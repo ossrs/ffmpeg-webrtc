@@ -54,8 +54,18 @@ typedef struct RTCContext {
      * DTLS and ICE information.
      * */
     char *sdp_offer;
+
+    /* The ICE username and pwd from remote server. */
+    char *ice_ufrag_remote;
+    char *ice_pwd_remote;
+    /* The ICE candidate protocol, priority, host and port. */
+    char *ice_protocol;
+    int ice_priority;
+    char *ice_host;
+    int ice_port;
     /* The SDP answer received from the WebRTC server. */
     char *sdp_answer;
+
     /* The HTTP URL context is the transport layer for the WHIP protocol. */
     URLContext *whip_uc;
 } RTCContext;
@@ -348,6 +358,71 @@ static int exchange_sdp(AVFormatContext *s)
     return ret;
 }
 
+/**
+ * Parse the ice ufrag, pwd and candidates from the answer.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int parse_answer(AVFormatContext *s)
+{
+    int ret = 0;
+    AVIOContext *pb;
+    char line[MAX_URL_SIZE];
+    const char *ptr;
+    int i;
+    RTCContext *rtc = s->priv_data;
+
+    pb = avio_alloc_context(
+        (unsigned char *)rtc->sdp_answer, (int)strlen(rtc->sdp_answer),
+        AVIO_FLAG_READ, NULL, NULL, NULL, NULL);
+    if (!pb) {
+        av_log(s, AV_LOG_ERROR, "Failed to alloc AVIOContext for answer: %s", rtc->sdp_answer);
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    for (i = 0; !avio_feof(pb); i++) {
+        ff_get_chomp_line(pb, line, sizeof(line));
+        if (av_strstart(line, "a=ice-ufrag:", &ptr)) {
+            av_freep(&rtc->ice_ufrag_remote);
+            rtc->ice_ufrag_remote = av_strdup(ptr);
+        } else if (av_strstart(line, "a=ice-pwd:", &ptr)) {
+            av_freep(&rtc->ice_pwd_remote);
+            rtc->ice_pwd_remote = av_strdup(ptr);
+        } else if (av_strstart(line, "a=candidate:", &ptr)) {
+            ptr = av_stristr(ptr, "udp");
+            if (ptr && av_stristr(ptr, "host")) {
+                char protocol[17], host[129];
+                int priority, port;
+                ret = sscanf(ptr, "%16s %d %128s %d typ host", protocol, &priority, host, &port);
+                if (ret != 4) {
+                    av_log(s, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s",
+                        ret, i, line, rtc->sdp_answer);
+                    ret = AVERROR(EINVAL);
+                    goto end;
+                }
+
+                if (av_strcasecmp(protocol, "udp")) {
+                    av_log(s, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp", protocol);
+                    ret = AVERROR(EINVAL);
+                    goto end;
+                }
+
+                av_freep(&rtc->ice_protocol);
+                rtc->ice_protocol = av_strdup(protocol);
+                av_freep(&rtc->ice_host);
+                rtc->ice_host = av_strdup(host);
+                rtc->ice_priority = priority;
+                rtc->ice_port = port;
+            }
+        }
+    }
+
+end:
+    avio_context_free(&pb);
+    return ret;
+}
+
 static int rtc_init(AVFormatContext *s)
 {
     int ret;
@@ -359,6 +434,9 @@ static int rtc_init(AVFormatContext *s)
         return ret;
 
     if ((ret = exchange_sdp(s)) < 0)
+        return ret;
+
+    if ((ret = parse_answer(s)) < 0)
         return ret;
 
     return 0;
@@ -385,6 +463,10 @@ static void rtc_deinit(AVFormatContext *s)
     av_freep(&rtc->sdp_offer);
     av_freep(&rtc->sdp_answer);
     ffurl_closep(&rtc->whip_uc);
+    av_freep(&rtc->ice_ufrag_remote);
+    av_freep(&rtc->ice_pwd_remote);
+    av_freep(&rtc->ice_protocol);
+    av_freep(&rtc->ice_host);
 }
 
 static const AVOption options[] = {
