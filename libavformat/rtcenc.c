@@ -33,6 +33,8 @@
 #include "url.h"
 #include "libavutil/random_seed.h"
 
+#define MAX_SDP_SIZE 8192
+
 typedef struct RTCContext {
     AVClass *av_class;
 
@@ -58,16 +60,16 @@ typedef struct RTCContext {
     /* The ICE username and pwd from remote server. */
     char *ice_ufrag_remote;
     char *ice_pwd_remote;
-    /* The ICE candidate protocol, priority, host and port. */
+    /**
+     * The ICE candidate protocol, priority, host and port. Note that only
+     * support one candidate for now. We will choose the first udp candidate.
+     * We will support multiple candidates in the future.
+     */
     char *ice_protocol;
-    int ice_priority;
     char *ice_host;
     int ice_port;
     /* The SDP answer received from the WebRTC server. */
     char *sdp_answer;
-
-    /* The HTTP URL context is the transport layer for the WHIP protocol. */
-    URLContext *whip_uc;
 } RTCContext;
 
 /**
@@ -186,8 +188,14 @@ static int check_codec(AVFormatContext *s)
  */
 static int generate_sdp_offer(AVFormatContext *s)
 {
-    int profile_iop;
+    int ret, profile_iop;
     RTCContext *rtc = s->priv_data;
+
+    char *tmp = av_mallocz(MAX_SDP_SIZE);
+    if (!tmp) {
+        av_log(s, AV_LOG_ERROR, "Failed to alloc answer: %s", s->url);
+        return AVERROR(EINVAL);
+    }
 
     if (rtc->sdp_offer) {
         av_log(s, AV_LOG_ERROR, "SDP offer is already set\n");
@@ -207,7 +215,8 @@ static int generate_sdp_offer(AVFormatContext *s)
     rtc->video_payload_type = 106;
 
     profile_iop = rtc->video_par->profile & FF_PROFILE_H264_CONSTRAINED ? 0xe0 : 0x00;
-    rtc->sdp_offer = av_asprintf(
+
+    ret = av_strlcatf(tmp, MAX_SDP_SIZE,
         "v=0\r\n"
         "o=FFmpeg 4489045141692799359 2 IN IP4 127.0.0.1\r\n"
         "s=FFmpegPublishSession\r\n"
@@ -262,11 +271,19 @@ static int generate_sdp_offer(AVFormatContext *s)
         profile_iop,
         rtc->video_par->level,
         rtc->video_ssrc,
-        rtc->video_ssrc
-    );
+        rtc->video_ssrc);
+    if (ret >= MAX_SDP_SIZE) {
+        av_log(s, AV_LOG_ERROR, "Offer %d exceed max %d, %s", ret, MAX_SDP_SIZE, tmp);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    rtc->sdp_offer = av_strdup(tmp);
     av_log(s, AV_LOG_VERBOSE, "Generated offer: %s", rtc->sdp_offer);
 
-    return 0;
+end:
+    av_free(tmp);
+    return ret;
 }
 
 /**
@@ -313,31 +330,38 @@ static int generate_sdp_offer(AVFormatContext *s)
 static int exchange_sdp(AVFormatContext *s)
 {
     int ret;
-    char headers[MAX_URL_SIZE], buf[MAX_URL_SIZE];
-    char *p;
+    char buf[MAX_URL_SIZE];
     RTCContext *rtc = s->priv_data;
+    /* The URL context is an HTTP transport layer for the WHIP protocol. */
+    URLContext *whip_uc = NULL;
 
-    ret = ffurl_alloc(&rtc->whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
+    char *tmp = av_mallocz(MAX_SDP_SIZE);
+    if (!tmp) {
+        av_log(s, AV_LOG_ERROR, "Failed to alloc answer: %s", s->url);
+        return AVERROR(EINVAL);
+    }
+
+    ret = ffurl_alloc(&whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
     if (ret < 0) {
         av_log(s, AV_LOG_ERROR, "Failed to alloc HTTP context: %s", s->url);
-        return ret;
+        goto end;
     }
 
-    snprintf(headers, sizeof(headers),
+    snprintf(buf, sizeof(buf),
              "Cache-Control: no-cache\r\n"
              "Content-Type: application/sdp\r\n");
-    av_opt_set(rtc->whip_uc->priv_data, "headers", headers, 0);
-    av_opt_set(rtc->whip_uc->priv_data, "chunked_post", "0", 0);
-    av_opt_set_bin(rtc->whip_uc->priv_data, "post_data", rtc->sdp_offer, (int)strlen(rtc->sdp_offer), 0);
+    av_opt_set(whip_uc->priv_data, "headers", buf, 0);
+    av_opt_set(whip_uc->priv_data, "chunked_post", "0", 0);
+    av_opt_set_bin(whip_uc->priv_data, "post_data", rtc->sdp_offer, (int)strlen(rtc->sdp_offer), 0);
 
-    ret = ffurl_connect(rtc->whip_uc, NULL);
+    ret = ffurl_connect(whip_uc, NULL);
     if (ret < 0) {
         av_log(s, AV_LOG_ERROR, "Failed to request url=%s, offer: %s", s->url, rtc->sdp_offer);
-        return ret;
+        goto end;
     }
 
-    for (;;) {
-        ret = ffurl_read(rtc->whip_uc, buf, sizeof(buf));
+    while (1) {
+        ret = ffurl_read(whip_uc, buf, sizeof(buf));
         if (ret == AVERROR_EOF) {
             /* Reset the error because we read all response as answer util EOF. */
             ret = 0;
@@ -346,15 +370,23 @@ static int exchange_sdp(AVFormatContext *s)
         if (ret <= 0) {
             av_log(s, AV_LOG_ERROR, "Failed to read response from url=%s, offer is %s, answer is %s",
                 s->url, rtc->sdp_offer, rtc->sdp_answer);
-            return ret;
+            goto end;
         }
 
-        p = rtc->sdp_answer;
-        rtc->sdp_answer = av_asprintf("%s%.*s", p ? p : "", ret, buf);
-        av_free(p);
+        ret = av_strlcatf(tmp, MAX_SDP_SIZE, "%.*s", ret, buf);
+        if (ret >= MAX_SDP_SIZE) {
+            av_log(s, AV_LOG_ERROR, "Answer %d exceed max size %d, %s", ret, MAX_SDP_SIZE, tmp);
+            ret = AVERROR(EINVAL);
+            goto end;
+        }
     }
+
+    rtc->sdp_answer = av_strdup(tmp);
     av_log(s, AV_LOG_VERBOSE, "Got answer: %s", rtc->sdp_answer);
 
+end:
+    ffurl_closep(&whip_uc);
+    av_free(tmp);
     return ret;
 }
 
@@ -372,9 +404,7 @@ static int parse_answer(AVFormatContext *s)
     int i;
     RTCContext *rtc = s->priv_data;
 
-    pb = avio_alloc_context(
-        (unsigned char *)rtc->sdp_answer, (int)strlen(rtc->sdp_answer),
-        AVIO_FLAG_READ, NULL, NULL, NULL, NULL);
+    pb = avio_alloc_context(rtc->sdp_answer, strlen(rtc->sdp_answer), AVIO_FLAG_READ, NULL, NULL, NULL, NULL);
     if (!pb) {
         av_log(s, AV_LOG_ERROR, "Failed to alloc AVIOContext for answer: %s", rtc->sdp_answer);
         ret = AVERROR(ENOMEM);
@@ -383,13 +413,11 @@ static int parse_answer(AVFormatContext *s)
 
     for (i = 0; !avio_feof(pb); i++) {
         ff_get_chomp_line(pb, line, sizeof(line));
-        if (av_strstart(line, "a=ice-ufrag:", &ptr)) {
-            av_freep(&rtc->ice_ufrag_remote);
+        if (av_strstart(line, "a=ice-ufrag:", &ptr) && !rtc->ice_ufrag_remote) {
             rtc->ice_ufrag_remote = av_strdup(ptr);
-        } else if (av_strstart(line, "a=ice-pwd:", &ptr)) {
-            av_freep(&rtc->ice_pwd_remote);
+        } else if (av_strstart(line, "a=ice-pwd:", &ptr) && !rtc->ice_pwd_remote) {
             rtc->ice_pwd_remote = av_strdup(ptr);
-        } else if (av_strstart(line, "a=candidate:", &ptr)) {
+        } else if (av_strstart(line, "a=candidate:", &ptr) && !rtc->ice_protocol) {
             ptr = av_stristr(ptr, "udp");
             if (ptr && av_stristr(ptr, "host")) {
                 char protocol[17], host[129];
@@ -403,27 +431,29 @@ static int parse_answer(AVFormatContext *s)
                 }
 
                 if (av_strcasecmp(protocol, "udp")) {
-                    av_log(s, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp", protocol);
+                    av_log(s, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp, line %d %s of %s",
+                        protocol, i, line, rtc->sdp_answer);
                     ret = AVERROR(EINVAL);
                     goto end;
                 }
 
-                av_freep(&rtc->ice_protocol);
                 rtc->ice_protocol = av_strdup(protocol);
-                av_freep(&rtc->ice_host);
                 rtc->ice_host = av_strdup(host);
-                rtc->ice_priority = priority;
                 rtc->ice_port = port;
             }
         }
     }
+
+    av_log(s, AV_LOG_VERBOSE, "SDP offer=%luB, answer=%luB, ufrag=%s, pwd=%luB, transport=%s://%s:%d\n",
+        strlen(rtc->sdp_offer), strlen(rtc->sdp_answer), rtc->ice_ufrag_remote, strlen(rtc->ice_pwd_remote),
+        rtc->ice_protocol, rtc->ice_host, rtc->ice_port);
 
 end:
     avio_context_free(&pb);
     return ret;
 }
 
-static int rtc_init(AVFormatContext *s)
+static av_cold int rtc_init(AVFormatContext *s)
 {
     int ret;
 
@@ -457,12 +487,11 @@ static int rtc_write_trailer(AVFormatContext *s)
     return 0;
 }
 
-static void rtc_deinit(AVFormatContext *s)
+static av_cold void rtc_deinit(AVFormatContext *s)
 {
     RTCContext *rtc = s->priv_data;
     av_freep(&rtc->sdp_offer);
     av_freep(&rtc->sdp_answer);
-    ffurl_closep(&rtc->whip_uc);
     av_freep(&rtc->ice_ufrag_remote);
     av_freep(&rtc->ice_pwd_remote);
     av_freep(&rtc->ice_protocol);

@@ -42,3 +42,4 @@
 /mapfile
 /tools/python/__pycache__/
 .idea
+patcheck.*
