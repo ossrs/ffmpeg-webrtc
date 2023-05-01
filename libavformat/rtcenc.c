@@ -32,8 +32,12 @@
 #include "libavutil/avstring.h"
 #include "url.h"
 #include "libavutil/random_seed.h"
+#include "avio_internal.h"
+#include "libavutil/hmac.h"
+#include "libavutil/crc.h"
 
 #define MAX_SDP_SIZE 8192
+#define MAX_UDP_SIZE 1500
 
 typedef struct RTCContext {
     AVClass *av_class;
@@ -70,6 +74,9 @@ typedef struct RTCContext {
     int ice_port;
     /* The SDP answer received from the WebRTC server. */
     char *sdp_answer;
+
+    /* The UDP transport is used for delivering ICE, DTLS and SRTP packets. */
+    URLContext *udp_uc;
 } RTCContext;
 
 /**
@@ -97,12 +104,12 @@ static int check_codec(AVFormatContext *s)
             if (par->codec_id != AV_CODEC_ID_H264) {
                 av_log(s, AV_LOG_ERROR, "Unsupported video codec %s by RTC, choose h264\n",
                        desc ? desc->name : "unknown");
-                return AVERROR(EINVAL);
+                return AVERROR_PATCHWELCOME;
             }
             if ((par->profile & ~FF_PROFILE_H264_CONSTRAINED) != FF_PROFILE_H264_BASELINE) {
                 av_log(s, AV_LOG_ERROR, "Profile %d of stream %d is not baseline, currently unsupported by RTC\n",
                        par->profile, i);
-                return AVERROR(EINVAL);
+                return AVERROR_PATCHWELCOME;
             }
             break;
         case AVMEDIA_TYPE_AUDIO:
@@ -115,24 +122,24 @@ static int check_codec(AVFormatContext *s)
             if (par->codec_id != AV_CODEC_ID_OPUS) {
                 av_log(s, AV_LOG_ERROR, "Unsupported audio codec %s by RTC, choose opus\n",
                     desc ? desc->name : "unknown");
-                return AVERROR(EINVAL);
+                return AVERROR_PATCHWELCOME;
             }
 
             if (par->ch_layout.nb_channels != 2) {
                 av_log(s, AV_LOG_ERROR, "Unsupported audio channels %d by RTC, choose stereo\n",
                     par->ch_layout.nb_channels);
-                return AVERROR(EINVAL);
+                return AVERROR_PATCHWELCOME;
             }
 
             if (par->sample_rate != 48000) {
                 av_log(s, AV_LOG_ERROR, "Unsupported audio sample rate %d by RTC, choose 48000\n", par->sample_rate);
-                return AVERROR(EINVAL);
+                return AVERROR_PATCHWELCOME;
             }
             break;
         default:
             av_log(s, AV_LOG_ERROR, "Codec type '%s' for stream %d is not supported by RTC\n",
                    av_get_media_type_string(par->codec_type), i);
-            return AVERROR(EINVAL);
+            return AVERROR_PATCHWELCOME;
         }
     }
 
@@ -194,7 +201,7 @@ static int generate_sdp_offer(AVFormatContext *s)
     char *tmp = av_mallocz(MAX_SDP_SIZE);
     if (!tmp) {
         av_log(s, AV_LOG_ERROR, "Failed to alloc answer: %s", s->url);
-        return AVERROR(EINVAL);
+        return AVERROR(ENOMEM);
     }
 
     if (rtc->sdp_offer) {
@@ -274,7 +281,7 @@ static int generate_sdp_offer(AVFormatContext *s)
         rtc->video_ssrc);
     if (ret >= MAX_SDP_SIZE) {
         av_log(s, AV_LOG_ERROR, "Offer %d exceed max %d, %s", ret, MAX_SDP_SIZE, tmp);
-        ret = AVERROR(EINVAL);
+        ret = AVERROR(EIO);
         goto end;
     }
 
@@ -338,7 +345,7 @@ static int exchange_sdp(AVFormatContext *s)
     char *tmp = av_mallocz(MAX_SDP_SIZE);
     if (!tmp) {
         av_log(s, AV_LOG_ERROR, "Failed to alloc answer: %s", s->url);
-        return AVERROR(EINVAL);
+        return AVERROR(ENOMEM);
     }
 
     ret = ffurl_alloc(&whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
@@ -376,7 +383,7 @@ static int exchange_sdp(AVFormatContext *s)
         ret = av_strlcatf(tmp, MAX_SDP_SIZE, "%.*s", ret, buf);
         if (ret >= MAX_SDP_SIZE) {
             av_log(s, AV_LOG_ERROR, "Answer %d exceed max size %d, %s", ret, MAX_SDP_SIZE, tmp);
-            ret = AVERROR(EINVAL);
+            ret = AVERROR(EIO);
             goto end;
         }
     }
@@ -426,14 +433,14 @@ static int parse_answer(AVFormatContext *s)
                 if (ret != 4) {
                     av_log(s, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s",
                         ret, i, line, rtc->sdp_answer);
-                    ret = AVERROR(EINVAL);
+                    ret = AVERROR(EIO);
                     goto end;
                 }
 
                 if (av_strcasecmp(protocol, "udp")) {
                     av_log(s, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp, line %d %s of %s",
                         protocol, i, line, rtc->sdp_answer);
-                    ret = AVERROR(EINVAL);
+                    ret = AVERROR(EIO);
                     goto end;
                 }
 
@@ -453,6 +460,115 @@ end:
     return ret;
 }
 
+/**
+ * Open the UDP transport and complete the ICE handshake.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int ice_handshake(AVFormatContext *s)
+{
+    int ret, len, crc32;
+    char url[256], buf[MAX_UDP_SIZE];
+    AVIOContext *pb = NULL;
+    AVHMAC *hmac = NULL;
+    RTCContext *rtc = s->priv_data;
+
+    pb = avio_alloc_context(buf, sizeof(buf), AVIO_FLAG_WRITE, NULL, NULL, NULL, NULL);
+    if (!pb) {
+        av_log(s, AV_LOG_ERROR, "Failed to alloc AVIOContext for ICE");
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    hmac = av_hmac_alloc(AV_HMAC_SHA1);
+    if (!hmac) {
+        av_log(s, AV_LOG_ERROR, "Failed to alloc AVHMAC for ICE");
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    /* Build UDP URL and create the UDP context as transport. */
+    ff_url_join(url, sizeof(url), "udp", NULL, rtc->ice_host, rtc->ice_port, NULL);
+    ret = ffurl_alloc(&rtc->udp_uc, url, AVIO_FLAG_WRITE | AVIO_FLAG_NONBLOCK, &s->interrupt_callback);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to open udp://%s:%d", rtc->ice_host, rtc->ice_port);
+        goto end;
+    }
+
+    av_opt_set(rtc->udp_uc->priv_data, "connect", "1", 0);
+    av_opt_set(rtc->udp_uc->priv_data, "fifo_size", "0", 0);
+
+    ret = ffurl_connect(rtc->udp_uc, NULL);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to connect udp://%s:%d", rtc->ice_host, rtc->ice_port);
+        goto end;
+    }
+
+    /* Set the transport as READ and WRITE after connected. */
+    rtc->udp_uc->flags |= AVIO_FLAG_READ;
+
+    /* Build and send the STUN binding request. */
+    /* Write 20 bytes header */
+    avio_wb16(pb, 0x0001); /* STUN binding request */
+    avio_wb16(pb, 0);      /* length */
+    avio_wb32(pb, 0x2112A442); /* magic cookie */
+    avio_wb32(pb, av_get_random_seed()); /* transaction ID */
+    avio_wb32(pb, av_get_random_seed()); /* transaction ID */
+    avio_wb32(pb, av_get_random_seed()); /* transaction ID */
+    /* Write the username attribute */
+    ret = snprintf(url, sizeof(url), "%s:%s", rtc->ice_ufrag_remote, rtc->ice_ufrag_local);
+    avio_wb16(pb, 0x0006); /* attribute type username */
+    avio_wb16(pb, ret); /* size of username */
+    avio_write(pb, url, ret); /* bytes of username */
+    ffio_fill(pb, 0, (4 - (ret % 4)) % 4); /* padding */
+    /* Build and update message integrity */
+    avio_wb16(pb, 0x0008); /* attribute type message integrity */
+    avio_wb16(pb, 20); /* size of message integrity */
+    ffio_fill(pb, 0, 20); /* fill with zero to directly write and skip it */
+    len = avio_tell(pb);
+    buf[2] = (len - 20) >> 8;
+    buf[3] = (len - 20) & 0xFF;
+    av_hmac_init(hmac, rtc->ice_pwd_local, strlen(rtc->ice_pwd_local));
+    av_hmac_update(hmac, buf, len - 24);
+    av_hmac_final(hmac, buf + len - 20, 20);
+    /* Write the fingerprint attribute */
+    avio_wb16(pb, 0x8028); /* attribute type fingerprint */
+    avio_wb16(pb, 4); /* size of fingerprint */
+    ffio_fill(pb, 0, 4); /* fill with zero to directly write and skip it */
+    len = avio_tell(pb);
+    buf[2] = (len - 20) >> 8;
+    buf[3] = (len - 20) & 0xFF;
+    crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF, buf, len - 8) ^ 0xFFFFFFFF;
+    avio_skip(pb, -4);
+    avio_wb32(pb, crc32 ^ 0x5354554E); /* hash message by CRC32 */
+
+    ret = ffurl_write(rtc->udp_uc, buf, len);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d", len);
+        goto end;
+    }
+
+    /* Read the STUN binding response. */
+    ret = ffurl_read(rtc->udp_uc, buf, sizeof(buf));
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to read STUN binding response");
+        goto end;
+    }
+
+    if (ret < 2 || buf[0] != 0x01 || buf[1] != 0x01) {
+        av_log(s, AV_LOG_ERROR, "Invalid STUN binding response, size=%d, type=%02X%02X", ret, buf[0], buf[1]);
+        ret = AVERROR(EIO);
+        goto end;
+    }
+    av_log(s, AV_LOG_VERBOSE, "ICE STUN ok, url=udp://%s:%d, username=%s:%s, request=%dB, response=%dB\n",
+        rtc->ice_host, rtc->ice_port, rtc->ice_ufrag_remote, rtc->ice_ufrag_local, len, ret);
+
+end:
+    avio_context_free(&pb);
+    av_hmac_free(hmac);
+    return ret;
+}
+
 static av_cold int rtc_init(AVFormatContext *s)
 {
     int ret;
@@ -467,6 +583,9 @@ static av_cold int rtc_init(AVFormatContext *s)
         return ret;
 
     if ((ret = parse_answer(s)) < 0)
+        return ret;
+
+    if ((ret = ice_handshake(s)) < 0)
         return ret;
 
     return 0;
@@ -496,6 +615,7 @@ static av_cold void rtc_deinit(AVFormatContext *s)
     av_freep(&rtc->ice_pwd_remote);
     av_freep(&rtc->ice_protocol);
     av_freep(&rtc->ice_host);
+    ffurl_closep(&rtc->udp_uc);
 }
 
 static const AVOption options[] = {
