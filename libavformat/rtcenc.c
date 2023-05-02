@@ -19,6 +19,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "config.h"
+
+#if CONFIG_OPENSSL
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
+
 #include "libavutil/dict.h"
 #include "libavutil/avassert.h"
 #include "libavutil/mathematics.h"
@@ -474,15 +481,15 @@ end:
  *
  * @return 0 if OK, AVERROR_xxx on error
  */
-static int ice_create_request(AVFormatContext *s, uint8_t *buf, int size, int *size_of_response)
+static int ice_create_request(AVFormatContext *s, uint8_t *buf, int size_of_buf, int *size_of_response)
 {
-    int ret, len, crc32;
+    int ret, size, crc32;
     char username[128];
     AVIOContext *pb = NULL;
     AVHMAC *hmac = NULL;
     RTCContext *rtc = s->priv_data;
 
-    pb = avio_alloc_context(buf, size, AVIO_FLAG_WRITE, NULL, NULL, NULL, NULL);
+    pb = avio_alloc_context(buf, size_of_buf, AVIO_FLAG_WRITE, NULL, NULL, NULL, NULL);
     if (!pb) {
         av_log(s, AV_LOG_ERROR, "Failed to alloc AVIOContext for ICE\n");
         ret = AVERROR(ENOMEM);
@@ -523,26 +530,26 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int size, int *s
     avio_wb16(pb, 0x0008); /* attribute type message integrity */
     avio_wb16(pb, 20); /* size of message integrity */
     ffio_fill(pb, 0, 20); /* fill with zero to directly write and skip it */
-    len = avio_tell(pb);
-    buf[2] = (len - 20) >> 8;
-    buf[3] = (len - 20) & 0xFF;
+    size = avio_tell(pb);
+    buf[2] = (size - 20) >> 8;
+    buf[3] = (size - 20) & 0xFF;
     av_hmac_init(hmac, rtc->ice_pwd_local, strlen(rtc->ice_pwd_local));
-    av_hmac_update(hmac, buf, len - 24);
-    av_hmac_final(hmac, buf + len - 20, 20);
+    av_hmac_update(hmac, buf, size - 24);
+    av_hmac_final(hmac, buf + size - 20, 20);
 
     /* write the fingerprint attribute */
     avio_wb16(pb, 0x8028); /* attribute type fingerprint */
     avio_wb16(pb, 4); /* size of fingerprint */
     ffio_fill(pb, 0, 4); /* fill with zero to directly write and skip it */
-    len = avio_tell(pb);
-    buf[2] = (len - 20) >> 8;
-    buf[3] = (len - 20) & 0xFF;
+    size = avio_tell(pb);
+    buf[2] = (size - 20) >> 8;
+    buf[3] = (size - 20) & 0xFF;
     /* refer to the av_hash_alloc("CRC32"), av_hash_init and av_hash_final */
-    crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF, buf, len - 8) ^ 0xFFFFFFFF;
+    crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF, buf, size - 8) ^ 0xFFFFFFFF;
     avio_skip(pb, -4);
     avio_wb32(pb, crc32 ^ 0x5354554E); /* xor with "STUN" */
 
-    *size_of_response = len;
+    *size_of_response = size;
 
 end:
     avio_context_free(&pb);
@@ -558,7 +565,7 @@ end:
  */
 static int ice_handshake(AVFormatContext *s)
 {
-    int ret, len, fast_retries = UDP_FAST_RETRIES, timeout = UDP_START_TIMEOUT;
+    int ret, size, fast_retries = UDP_FAST_RETRIES, timeout = UDP_START_TIMEOUT;
     char url[256], buf[MAX_UDP_SIZE];
     RTCContext *rtc = s->priv_data;
 
@@ -584,17 +591,17 @@ static int ice_handshake(AVFormatContext *s)
     rtc->udp_uc->flags |= AVIO_FLAG_READ | AVIO_FLAG_NONBLOCK;
 
     /* Build the STUN binding request. */
-    ret = ice_create_request(s, buf, sizeof(buf), &len);
+    ret = ice_create_request(s, buf, sizeof(buf), &size);
     if (ret < 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to create STUN binding request, len=%d\n", len);
+        av_log(s, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
         goto end;
     }
 
     /* Fast retransmit the STUN binding request. */
     do {
-        ret = ffurl_write(rtc->udp_uc, buf, len);
+        ret = ffurl_write(rtc->udp_uc, buf, size);
         if (ret < 0) {
-            av_log(s, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", len);
+            av_log(s, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
             goto end;
         }
 
@@ -624,13 +631,41 @@ static int ice_handshake(AVFormatContext *s)
     }
 
     av_log(s, AV_LOG_VERBOSE, "ICE STUN ok, url=udp://%s:%d, username=%s:%s, req=%dB, res=%dB, arq=%d\n",
-        rtc->ice_host, rtc->ice_port, rtc->ice_ufrag_remote, rtc->ice_ufrag_local, len, ret,
+        rtc->ice_host, rtc->ice_port, rtc->ice_ufrag_remote, rtc->ice_ufrag_local, size, ret,
         UDP_FAST_RETRIES - fast_retries);
     ret = 0;
 
 end:
     return ret;
 }
+
+#if CONFIG_OPENSSL
+/**
+ * DTLS handshake with server, as a client in active mode, using openssl.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int dtls_handshake_openssl(AVFormatContext *s)
+{
+    int ret = 0;
+    SSL_CTX *dtls_ctx = NULL;
+
+#if OPENSSL_VERSION_NUMBER < 0x10002000L // v1.0.2
+    dtls_ctx = SSL_CTX_new(DTLSv1_method());
+#else
+    dtls_ctx = SSL_CTX_new(DTLS_client_method());
+#endif
+    if (!dtls_ctx) {
+        av_log(s, AV_LOG_ERROR, "Failed to create DTLS context\n");
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+end:
+    SSL_CTX_free(dtls_ctx);
+    return ret;
+}
+#endif
 
 static av_cold int rtc_init(AVFormatContext *s)
 {
@@ -657,6 +692,14 @@ static int rtc_write_header(AVFormatContext *s)
 
     if ((ret = ice_handshake(s)) < 0)
         return ret;
+
+#if CONFIG_OPENSSL
+    if ((ret = dtls_handshake_openssl(s)) < 0)
+        return ret;
+#else
+    av_log(s, AV_LOG_ERROR, "DTLS is not supported, please enable openssl\n");
+    return AVERROR(ENOSYS);
+#endif
 
     return ret;
 }
