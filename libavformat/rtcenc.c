@@ -54,6 +54,17 @@
 #define MAX_SDP_SIZE 8192
 /* The maximum size of a UDP packet, should be smaller than the MTU. */
 #define MAX_UDP_SIZE 1500
+/**
+ * The RTP payload max size, reserved some paddings for SRTP as such:
+ *      kRtpPacketSize = kRtpMaxPayloadSize + paddings
+ * For example, if kRtpPacketSize is 1500, recommend to set kRtpMaxPayloadSize to 1400,
+ * which reserves 100 bytes for SRTP or paddings.
+ * otherwise, the kRtpPacketSize must less than MTU, in webrtc source code,
+ * the rtp max size is assigned by kVideoMtu = 1200.
+ * so we set kRtpMaxPayloadSize = 1200.
+ * see @doc https://groups.google.com/g/discuss-webrtc/c/gH5ysR3SoZI
+ */
+#define MAX_UDP_PAYLOAD_SIZE (MAX_UDP_SIZE - 300)
 /* The maximum number of retries for UDP transmission. */
 #define UDP_FAST_RETRIES 6
 /* The startup timeout for UDP transmission. */
@@ -1075,6 +1086,107 @@ end:
     return ret;
 }
 
+static int write_packet(void *opaque, uint8_t *buf, int buf_size)
+{
+    AVFormatContext *s = opaque;
+    RTCContext *rtc = s->priv_data;
+
+    char cipher[MAX_UDP_SIZE];
+    int len = ff_srtp_encrypt(&rtc->srtp_send, buf, buf_size, cipher, sizeof(cipher));
+    if (len <= 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to encrypt packet=%dB, cipher=%dB\n", buf_size, len);
+        return AVERROR(EIO);
+    }
+    return ffurl_write(rtc->udp_uc, cipher, len);
+}
+
+/**
+ * Create a RTP muxer to build RTP packets from the encoded frames.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int create_rtp_muxer(AVFormatContext *s)
+{
+    int ret, i, is_video;
+    AVFormatContext *rtp_ctx = NULL;
+    AVDictionary *opts = NULL;
+    uint8_t *buffer = NULL;
+    char buf[64];
+    RTCContext *rtc = s->priv_data;
+
+    const AVOutputFormat *rtp_format = av_guess_format("rtp", NULL, NULL);
+    if (!rtp_format) {
+        av_log(s, AV_LOG_ERROR, "Failed to guess rtp muxer\n");
+        ret = AVERROR(ENOSYS);
+        goto end;
+    }
+
+    for (i = 0; i < s->nb_streams; i++) {
+        rtp_ctx = avformat_alloc_context();
+        if (!rtp_ctx) {
+            av_log(s, AV_LOG_ERROR, "Failed to allocate rtp muxer\n");
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+
+        rtp_ctx->oformat = rtp_format;
+        if (!avformat_new_stream(rtp_ctx, NULL)) {
+            av_log(s, AV_LOG_ERROR, "Failed to create rtp stream\n");
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        /* Pass the interrupt callback on */
+        rtp_ctx->interrupt_callback = s->interrupt_callback;
+        /* Copy the max delay setting; the rtp muxer reads this. */
+        rtp_ctx->max_delay = s->max_delay;
+        /* Copy other stream parameters. */
+        rtp_ctx->streams[0]->sample_aspect_ratio = s->streams[i]->sample_aspect_ratio;
+        rtp_ctx->flags |= s->flags & AVFMT_FLAG_BITEXACT;
+        rtp_ctx->strict_std_compliance = s->strict_std_compliance;
+
+        /* Set the synchronized start time. */
+        rtp_ctx->start_time_realtime = s->start_time_realtime;
+
+        avcodec_parameters_copy(rtp_ctx->streams[0]->codecpar, s->streams[i]->codecpar);
+        rtp_ctx->streams[0]->time_base = s->streams[i]->time_base;
+
+        buffer = av_malloc(MAX_UDP_SIZE);
+        rtp_ctx->pb = avio_alloc_context(buffer, MAX_UDP_SIZE, AVIO_FLAG_WRITE, s, NULL, write_packet, NULL);
+        if (!rtp_ctx->pb) {
+            av_log(s, AV_LOG_ERROR, "Failed to allocate rtp pb\n");
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        rtp_ctx->pb->max_packet_size = MAX_UDP_PAYLOAD_SIZE;
+        rtp_ctx->pb->av_class = &ff_avio_class;
+
+        is_video = s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+        snprintf(buf, sizeof(buf), "%d", is_video? rtc->video_payload_type : rtc->audio_payload_type);
+        av_dict_set(&opts, "payload_type", buf, 0);
+        snprintf(buf, sizeof(buf), "%d", is_video? rtc->video_ssrc : rtc->audio_ssrc);
+        av_dict_set(&opts, "ssrc", buf, 0);
+        av_dict_set(&opts, "rtpflags", "4", 0); /* FF_RTP_FLAG_SKIP_RTCP */
+
+        ret = avformat_write_header(rtp_ctx, &opts);
+        if (ret < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to write rtp header\n");
+            goto end;
+        }
+
+        ff_format_set_url(rtp_ctx, av_strdup(s->url));
+        s->streams[i]->time_base = rtp_ctx->streams[0]->time_base;
+        s->streams[i]->priv_data = rtp_ctx;
+        rtp_ctx = NULL;
+    }
+
+end:
+    if (rtp_ctx)
+        avio_context_free(&rtp_ctx->pb);
+    avformat_free_context(rtp_ctx);
+    av_dict_free(&opts);
+    return ret;
+}
+
 static av_cold int rtc_init(AVFormatContext *s)
 {
     int ret;
@@ -1112,12 +1224,20 @@ static int rtc_write_header(AVFormatContext *s)
     if ((ret = setup_srtp(s)) < 0)
         return ret;
 
+    if ((ret = create_rtp_muxer(s)) < 0)
+        return ret;
+
     return ret;
 }
 
 static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
 {
-    return 0;
+    AVStream *st = s->streams[pkt->stream_index];
+    AVFormatContext *rtp_ctx = st->priv_data;
+    if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) {
+        return 0;
+    }
+    return ff_write_chained(rtp_ctx, 0, pkt, s, 0);
 }
 
 static int rtc_write_trailer(AVFormatContext *s)
@@ -1127,7 +1247,20 @@ static int rtc_write_trailer(AVFormatContext *s)
 
 static av_cold void rtc_deinit(AVFormatContext *s)
 {
+    int i;
     RTCContext *rtc = s->priv_data;
+
+    for (i = 0; i < s->nb_streams; i++) {
+        AVFormatContext* rtp_ctx = s->streams[i]->priv_data;
+        if (!rtp_ctx)
+            continue;
+
+        av_write_trailer(rtp_ctx);
+        avio_context_free(&rtp_ctx->pb);
+        avformat_free_context(rtp_ctx);
+        s->streams[i]->priv_data = NULL;
+    }
+
     av_freep(&rtc->sdp_offer);
     av_freep(&rtc->sdp_answer);
     av_freep(&rtc->ice_ufrag_remote);
