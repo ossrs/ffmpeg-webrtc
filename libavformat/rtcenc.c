@@ -146,6 +146,9 @@ typedef struct RTCContext {
     /* The SRTP receive context, to decrypt incoming packets. */
     struct SRTPContext srtp_recv;
 
+    /* The time jitter base for audio OPUS stream. */
+    int64_t audio_jitter_base;
+
     /* The UDP transport is used for delivering ICE, DTLS and SRTP packets. */
     URLContext *udp_uc;
 } RTCContext;
@@ -383,8 +386,6 @@ static int generate_sdp_offer(AVFormatContext *s)
     rtc->audio_payload_type = 111;
     rtc->video_payload_type = 106;
 
-    profile_iop = rtc->video_par->profile & FF_PROFILE_H264_CONSTRAINED ? 0xe0 : 0x00;
-
     ret = av_strlcatf(tmp, MAX_SDP_SIZE,
         "v=0\r\n"
         "o=FFmpeg 4489045141692799359 2 IN IP4 127.0.0.1\r\n"
@@ -392,59 +393,76 @@ static int generate_sdp_offer(AVFormatContext *s)
         "t=0 0\r\n"
         "a=group:BUNDLE 0 1\r\n"
         "a=extmap-allow-mixed\r\n"
-        "a=msid-semantic: WMS\r\n"
-        ""
-        "m=audio 9 UDP/TLS/RTP/SAVPF %u\r\n"
-        "c=IN IP4 0.0.0.0\r\n"
-        "a=ice-ufrag:%s\r\n"
-        "a=ice-pwd:%s\r\n"
-        "a=fingerprint:sha-256 EE:FE:A2:E5:6A:21:78:60:71:2C:21:DC:1A:2C:98:12:0C:E8:AD:68:07:61:1B:0E:FC:46:97:1E:BC:97:4A:54\r\n"
-        "a=setup:active\r\n"
-        "a=mid:0\r\n"
-        "a=sendonly\r\n"
-        "a=msid:FFmpeg audio\r\n"
-        "a=rtcp-mux\r\n"
-        "a=rtpmap:%u opus/%d/%d\r\n"
-        "a=ssrc:%u cname:FFmpeg\r\n"
-        "a=ssrc:%u msid:FFmpeg audio\r\n"
-        ""
-        "m=video 9 UDP/TLS/RTP/SAVPF %u\r\n"
-        "c=IN IP4 0.0.0.0\r\n"
-        "a=ice-ufrag:%s\r\n"
-        "a=ice-pwd:%s\r\n"
-        "a=fingerprint:sha-256 EE:FE:A2:E5:6A:21:78:60:71:2C:21:DC:1A:2C:98:12:0C:E8:AD:68:07:61:1B:0E:FC:46:97:1E:BC:97:4A:54\r\n"
-        "a=setup:active\r\n"
-        "a=mid:1\r\n"
-        "a=sendonly\r\n"
-        "a=msid:FFmpeg video\r\n"
-        "a=rtcp-mux\r\n"
-        "a=rtcp-rsize\r\n"
-        "a=rtpmap:%u H264/90000\r\n"
-        "a=fmtp:%u level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=%02x%02x%02x\r\n"
-        "a=ssrc:%u cname:FFmpeg\r\n"
-        "a=ssrc:%u msid:FFmpeg video\r\n",
-        rtc->audio_payload_type,
-        rtc->ice_ufrag_local,
-        rtc->ice_pwd_local,
-        rtc->audio_payload_type,
-        rtc->audio_par->sample_rate,
-        rtc->audio_par->ch_layout.nb_channels,
-        rtc->audio_ssrc,
-        rtc->audio_ssrc,
-        rtc->video_payload_type,
-        rtc->ice_ufrag_local,
-        rtc->ice_pwd_local,
-        rtc->video_payload_type,
-        rtc->video_payload_type,
-        rtc->video_par->profile & (~FF_PROFILE_H264_CONSTRAINED),
-        profile_iop,
-        rtc->video_par->level,
-        rtc->video_ssrc,
-        rtc->video_ssrc);
+        "a=msid-semantic: WMS\r\n");
     if (ret >= MAX_SDP_SIZE) {
         av_log(s, AV_LOG_ERROR, "Offer %d exceed max %d, %s\n", ret, MAX_SDP_SIZE, tmp);
         ret = AVERROR(EIO);
         goto end;
+    }
+
+    if (rtc->audio_par) {
+        ret = av_strlcatf(tmp, MAX_SDP_SIZE, ""
+            "m=audio 9 UDP/TLS/RTP/SAVPF %u\r\n"
+            "c=IN IP4 0.0.0.0\r\n"
+            "a=ice-ufrag:%s\r\n"
+            "a=ice-pwd:%s\r\n"
+            "a=fingerprint:sha-256 EE:FE:A2:E5:6A:21:78:60:71:2C:21:DC:1A:2C:98:12:0C:E8:AD:68:07:61:1B:0E:FC:46:97:1E:BC:97:4A:54\r\n"
+            "a=setup:active\r\n"
+            "a=mid:0\r\n"
+            "a=sendonly\r\n"
+            "a=msid:FFmpeg audio\r\n"
+            "a=rtcp-mux\r\n"
+            "a=rtpmap:%u opus/%d/%d\r\n"
+            "a=ssrc:%u cname:FFmpeg\r\n"
+            "a=ssrc:%u msid:FFmpeg audio\r\n",
+            rtc->audio_payload_type,
+            rtc->ice_ufrag_local,
+            rtc->ice_pwd_local,
+            rtc->audio_payload_type,
+            rtc->audio_par->sample_rate,
+            rtc->audio_par->ch_layout.nb_channels,
+            rtc->audio_ssrc,
+            rtc->audio_ssrc);
+        if (ret >= MAX_SDP_SIZE) {
+            av_log(s, AV_LOG_ERROR, "Offer %d exceed max %d, %s\n", ret, MAX_SDP_SIZE, tmp);
+            ret = AVERROR(EIO);
+            goto end;
+        }
+    }
+
+    if (rtc->video_par) {
+        profile_iop = rtc->video_par->profile & FF_PROFILE_H264_CONSTRAINED ? 0xe0 : 0x00;
+        ret = av_strlcatf(tmp, MAX_SDP_SIZE, ""
+            "m=video 9 UDP/TLS/RTP/SAVPF %u\r\n"
+            "c=IN IP4 0.0.0.0\r\n"
+            "a=ice-ufrag:%s\r\n"
+            "a=ice-pwd:%s\r\n"
+            "a=fingerprint:sha-256 EE:FE:A2:E5:6A:21:78:60:71:2C:21:DC:1A:2C:98:12:0C:E8:AD:68:07:61:1B:0E:FC:46:97:1E:BC:97:4A:54\r\n"
+            "a=setup:active\r\n"
+            "a=mid:1\r\n"
+            "a=sendonly\r\n"
+            "a=msid:FFmpeg video\r\n"
+            "a=rtcp-mux\r\n"
+            "a=rtcp-rsize\r\n"
+            "a=rtpmap:%u H264/90000\r\n"
+            "a=fmtp:%u level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=%02x%02x%02x\r\n"
+            "a=ssrc:%u cname:FFmpeg\r\n"
+            "a=ssrc:%u msid:FFmpeg video\r\n",
+            rtc->video_payload_type,
+            rtc->ice_ufrag_local,
+            rtc->ice_pwd_local,
+            rtc->video_payload_type,
+            rtc->video_payload_type,
+            rtc->video_par->profile & (~FF_PROFILE_H264_CONSTRAINED),
+            profile_iop,
+            rtc->video_par->level,
+            rtc->video_ssrc,
+            rtc->video_ssrc);
+        if (ret >= MAX_SDP_SIZE) {
+            av_log(s, AV_LOG_ERROR, "Offer %d exceed max %d, %s\n", ret, MAX_SDP_SIZE, tmp);
+            ret = AVERROR(EIO);
+            goto end;
+        }
     }
 
     rtc->sdp_offer = av_strdup(tmp);
@@ -1395,6 +1413,12 @@ static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
     AVFormatContext *rtp_ctx = st->priv_data;
 
     /* TODO: Send binding request every 1s as WebRTC heartbeat. */
+
+    /* For audio OPUS stream, correct the timestamp. */
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        pkt->dts = pkt->pts = rtc->audio_jitter_base;
+        rtc->audio_jitter_base += 960;
+    }
 
     /* Insert a packet with SPS/PPS before each IDR frame. */
     is_idr = (pkt->flags & AV_PKT_FLAG_KEY) && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
