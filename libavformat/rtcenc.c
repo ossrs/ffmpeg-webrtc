@@ -49,6 +49,7 @@
 #include "libavutil/time.h"
 #include "libavutil/base64.h"
 #include "srtp.h"
+#include "avc.h"
 
 /* The maximum size of an SDP, either offer or answer. */
 #define MAX_SDP_SIZE 8192
@@ -161,6 +162,19 @@ static int isom_read_avcc(AVFormatContext *s, uint8_t *extradata, int  extradata
     AVIOContext *pb;
     RTCContext *rtc = s->priv_data;
 
+    if (!extradata || !extradata_size)
+        return 0;
+
+    /* Not H.264 IOSM format, may be annexb etc. */
+    if (extradata_size < 4 || extradata[0] != 1) {
+        if (!ff_avc_find_startcode(extradata, extradata + extradata_size)) {
+            av_log(s, AV_LOG_ERROR, "Format must be ISOM or annexb\n");
+            return AVERROR_INVALIDDATA;
+        }
+        return 0;
+    }
+
+    /* Parse the SPS/PPS in ISOM format in extradata. */
     pb = avio_alloc_context(extradata, extradata_size, 0, NULL, NULL, NULL, NULL);
     if (!pb) {
         av_log(s, AV_LOG_ERROR, "Failed to alloc AVIOContext, size=%d\n", extradata_size);
@@ -265,7 +279,7 @@ static int parse_codec(AVFormatContext *s)
                        desc ? desc->name : "unknown");
                 return AVERROR_PATCHWELCOME;
             }
-            if ((par->profile & ~FF_PROFILE_H264_CONSTRAINED) != FF_PROFILE_H264_BASELINE) {
+            if (par->profile > 0 && (par->profile & ~FF_PROFILE_H264_CONSTRAINED) != FF_PROFILE_H264_BASELINE) {
                 av_log(s, AV_LOG_ERROR, "Profile %d of stream %d is not baseline, currently unsupported by RTC\n",
                        par->profile, i);
                 return AVERROR_PATCHWELCOME;
@@ -360,7 +374,7 @@ static int parse_codec(AVFormatContext *s)
  */
 static int generate_sdp_offer(AVFormatContext *s)
 {
-    int ret, profile_iop;
+    int ret, profile, level, profile_iop;
     RTCContext *rtc = s->priv_data;
 
     char *tmp = av_mallocz(MAX_SDP_SIZE);
@@ -431,7 +445,9 @@ static int generate_sdp_offer(AVFormatContext *s)
     }
 
     if (rtc->video_par) {
-        profile_iop = rtc->video_par->profile & FF_PROFILE_H264_CONSTRAINED ? 0xe0 : 0x00;
+        profile = rtc->video_par->profile < 0 ? 0xe0 : rtc->video_par->profile;
+        level = rtc->video_par->level < 0 ? 30 : rtc->video_par->level;
+        profile_iop = profile & FF_PROFILE_H264_CONSTRAINED;
         ret = av_strlcatf(tmp, MAX_SDP_SIZE, ""
             "m=video 9 UDP/TLS/RTP/SAVPF %u\r\n"
             "c=IN IP4 0.0.0.0\r\n"
@@ -453,9 +469,9 @@ static int generate_sdp_offer(AVFormatContext *s)
             rtc->ice_pwd_local,
             rtc->video_payload_type,
             rtc->video_payload_type,
-            rtc->video_par->profile & (~FF_PROFILE_H264_CONSTRAINED),
+            profile & (~FF_PROFILE_H264_CONSTRAINED),
             profile_iop,
-            rtc->video_par->level,
+            level,
             rtc->video_ssrc,
             rtc->video_ssrc);
         if (ret >= MAX_SDP_SIZE) {
@@ -1266,7 +1282,7 @@ static int write_packet(void *opaque, uint8_t *buf, int buf_size)
 
     ret = ffurl_write(rtc->udp_uc, cipher, cipher_size);
     if (ret < 0) {
-        av_log(s, AV_LOG_WARNING, "Failed to write packet=%dB, ret=%d\n", cipher_size, ret);
+        av_log(s, AV_LOG_ERROR, "Failed to write packet=%dB, ret=%d\n", cipher_size, ret);
         return ret;
     }
 
@@ -1422,29 +1438,35 @@ static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
 
     /* Insert a packet with SPS/PPS before each IDR frame. */
     is_idr = (pkt->flags & AV_PKT_FLAG_KEY) && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
-    if (is_idr && rtc->avc_sps && rtc->avc_pps) {
+    if (is_idr && st->codecpar->extradata) {
         extra = av_packet_alloc();
-        size = rtc->avc_nal_length_size * 2 + rtc->avc_sps_size + rtc->avc_pps_size;
+        size = !rtc->avc_nal_length_size ? st->codecpar->extradata_size :
+                rtc->avc_nal_length_size * 2 + rtc->avc_sps_size + rtc->avc_pps_size;
         ret = av_new_packet(extra, size);
         if (ret < 0) {
             av_log(s, AV_LOG_ERROR, "Failed to allocate extra packet\n");
             return ret;
         }
 
-        /* Encode SPS in ISOM format. */
-        p = extra->data;
-        for (i = 0; i < rtc->avc_nal_length_size; i++) {
-            *p++ = rtc->avc_sps_size >> (8 * (rtc->avc_nal_length_size - i - 1));
-        }
-        memcpy(p, rtc->avc_sps, rtc->avc_sps_size);
-        p += rtc->avc_sps_size;
+        /* Encode SPS/PPS in annexb format. */
+        if (!rtc->avc_nal_length_size) {
+            memcpy(extra->data, st->codecpar->extradata, size);
+        } else {
+            /* Encode SPS/PPS in ISOM format. */
+            p = extra->data;
+            for (i = 0; i < rtc->avc_nal_length_size; i++) {
+                *p++ = rtc->avc_sps_size >> (8 * (rtc->avc_nal_length_size - i - 1));
+            }
+            memcpy(p, rtc->avc_sps, rtc->avc_sps_size);
+            p += rtc->avc_sps_size;
 
-        /* Encode PPS in ISOM format. */
-        for (i = 0; i < rtc->avc_nal_length_size; i++) {
-            *p++ = rtc->avc_pps_size >> (8 * (rtc->avc_nal_length_size - i - 1));
+            /* Encode PPS in ISOM format. */
+            for (i = 0; i < rtc->avc_nal_length_size; i++) {
+                *p++ = rtc->avc_pps_size >> (8 * (rtc->avc_nal_length_size - i - 1));
+            }
+            memcpy(p, rtc->avc_pps, rtc->avc_pps_size);
+            p += rtc->avc_pps_size;
         }
-        memcpy(p, rtc->avc_pps, rtc->avc_pps_size);
-        p += rtc->avc_pps_size;
 
         /* Setup packet and feed it to chain. */
         extra->pts = pkt->pts;
