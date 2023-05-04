@@ -469,7 +469,7 @@ OBJS-$(CONFIG_JACOSUB_DECODER)         += jacosubdec.o ass.o
 OBJS-$(CONFIG_JPEG2000_ENCODER)        += j2kenc.o mqcenc.o mqc.o jpeg2000.o \
                                           jpeg2000dwt.o
 OBJS-$(CONFIG_JPEG2000_DECODER)        += jpeg2000dec.o jpeg2000.o jpeg2000dsp.o \
-                                          jpeg2000dwt.o mqcdec.o mqc.o
+                                          jpeg2000dwt.o mqcdec.o mqc.o jpeg2000htdec.o
 OBJS-$(CONFIG_JPEGLS_DECODER)          += jpeglsdec.o jpegls.o
 OBJS-$(CONFIG_JPEGLS_ENCODER)          += jpeglsenc.o jpegls.o
 OBJS-$(CONFIG_JV_DECODER)              += jvdec.o
@@ -583,6 +583,7 @@ OBJS-$(CONFIG_PBM_DECODER)             += pnmdec.o pnm.o
 OBJS-$(CONFIG_PBM_ENCODER)             += pnmenc.o
 OBJS-$(CONFIG_PCX_DECODER)             += pcx.o
 OBJS-$(CONFIG_PCX_ENCODER)             += pcxenc.o
+OBJS-$(CONFIG_PDV_DECODER)             += pdvdec.o
 OBJS-$(CONFIG_PFM_DECODER)             += pnmdec.o pnm.o
 OBJS-$(CONFIG_PFM_ENCODER)             += pnmenc.o
 OBJS-$(CONFIG_PGM_DECODER)             += pnmdec.o pnm.o

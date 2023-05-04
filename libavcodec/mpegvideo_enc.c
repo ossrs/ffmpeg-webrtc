@@ -798,6 +798,11 @@ av_cold int ff_mpv_encode_init(AVCodecContext *avctx)
                                                 AV_CODEC_FLAG_INTERLACED_ME) ||
                                 s->alternate_scan);
 
+    if (s->lmin > s->lmax) {
+        av_log(avctx, AV_LOG_WARNING, "Clipping lmin value to %d\n", s->lmax);
+        s->lmin = s->lmax;
+    }
+
     /* init */
     ff_mpv_idct_init(s);
     if ((ret = ff_mpv_common_init(s)) < 0)
@@ -902,8 +907,10 @@ av_cold int ff_mpv_encode_init(AVCodecContext *avctx)
 
     s->quant_precision = 5;
 
-    ff_set_cmp(&s->mecc, s->mecc.ildct_cmp,      avctx->ildct_cmp);
-    ff_set_cmp(&s->mecc, s->mecc.frame_skip_cmp, s->frame_skip_cmp);
+    ret  = ff_set_cmp(&s->mecc, s->mecc.ildct_cmp,      avctx->ildct_cmp);
+    ret |= ff_set_cmp(&s->mecc, s->mecc.frame_skip_cmp, s->frame_skip_cmp);
+    if (ret < 0)
+        return AVERROR(EINVAL);
 
     if (CONFIG_H263_ENCODER && s->out_format == FMT_H263) {
         ff_h263_encode_init(s);

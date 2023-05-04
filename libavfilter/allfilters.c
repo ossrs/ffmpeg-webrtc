@@ -75,6 +75,7 @@ extern const AVFilter ff_af_apulsator;
 extern const AVFilter ff_af_arealtime;
 extern const AVFilter ff_af_aresample;
 extern const AVFilter ff_af_areverse;
+extern const AVFilter ff_af_arls;
 extern const AVFilter ff_af_arnndn;
 extern const AVFilter ff_af_asdr;
 extern const AVFilter ff_af_asegment;
@@ -160,6 +161,7 @@ extern const AVFilter ff_af_volumedetect;
 
 extern const AVFilter ff_asrc_aevalsrc;
 extern const AVFilter ff_asrc_afdelaysrc;
+extern const AVFilter ff_asrc_afireqsrc;
 extern const AVFilter ff_asrc_afirsrc;
 extern const AVFilter ff_asrc_anoisesrc;
 extern const AVFilter ff_asrc_anullsrc;

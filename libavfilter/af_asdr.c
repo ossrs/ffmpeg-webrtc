@@ -37,34 +37,43 @@ typedef struct AudioSDRContext {
     AVFrame *cache[2];
 } AudioSDRContext;
 
-static void sdr(AVFilterContext *ctx, const AVFrame *u, const AVFrame *v)
+static int sdr(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
 {
     AudioSDRContext *s = ctx->priv;
+    AVFrame *u = s->cache[0];
+    AVFrame *v = s->cache[1];
+    const int channels = u->ch_layout.nb_channels;
+    const int start = (channels * jobnr) / nb_jobs;
+    const int end = (channels * (jobnr+1)) / nb_jobs;
+    const int nb_samples = u->nb_samples;
 
-    for (int ch = 0; ch < u->ch_layout.nb_channels; ch++) {
+    for (int ch = start; ch < end; ch++) {
         const double *const us = (double *)u->extended_data[ch];
         const double *const vs = (double *)v->extended_data[ch];
-        double sum_uv = s->sum_uv[ch];
-        double sum_u = s->sum_u[ch];
+        double sum_uv = 0.;
+        double sum_u = 0.;
 
-        for (int n = 0; n < u->nb_samples; n++) {
+        for (int n = 0; n < nb_samples; n++) {
             sum_u  += us[n] * us[n];
             sum_uv += (us[n] - vs[n]) * (us[n] - vs[n]);
         }
 
-        s->sum_uv[ch] = sum_uv;
-        s->sum_u[ch]  = sum_u;
+        s->sum_uv[ch] += sum_uv;
+        s->sum_u[ch]  += sum_u;
     }
+
+    return 0;
 }
 
 static int activate(AVFilterContext *ctx)
 {
     AudioSDRContext *s = ctx->priv;
+    AVFilterLink *outlink = ctx->outputs[0];
     int ret, status;
     int available;
     int64_t pts;
 
-    FF_FILTER_FORWARD_STATUS_BACK_ALL(ctx->outputs[0], ctx);
+    FF_FILTER_FORWARD_STATUS_BACK_ALL(outlink, ctx);
 
     available = FFMIN(ff_inlink_queued_samples(ctx->inputs[0]), ff_inlink_queued_samples(ctx->inputs[1]));
     if (available > 0) {
@@ -78,26 +87,29 @@ static int activate(AVFilterContext *ctx)
             }
         }
 
-        sdr(ctx, s->cache[0], s->cache[1]);
+        if (!ctx->is_disabled)
+            ff_filter_execute(ctx, sdr, NULL, NULL,
+                              FFMIN(outlink->ch_layout.nb_channels, ff_filter_get_nb_threads(ctx)));
 
         av_frame_free(&s->cache[1]);
         out = s->cache[0];
         out->nb_samples = available;
-        out->pts = s->pts;
+        out->pts = av_rescale_q(s->pts, av_make_q(1, outlink->sample_rate), outlink->time_base);
+        out->duration = av_rescale_q(out->nb_samples, av_make_q(1, outlink->sample_rate), outlink->time_base);
         s->pts += available;
         s->cache[0] = NULL;
 
-        return ff_filter_frame(ctx->outputs[0], out);
+        return ff_filter_frame(outlink, out);
     }
 
     for (int i = 0; i < 2; i++) {
         if (ff_inlink_acknowledge_status(ctx->inputs[i], &status, &pts)) {
-            ff_outlink_set_status(ctx->outputs[0], status, s->pts);
+            ff_outlink_set_status(outlink, status, s->pts);
             return 0;
         }
     }
 
-    if (ff_outlink_frame_wanted(ctx->outputs[0])) {
+    if (ff_outlink_frame_wanted(outlink)) {
         for (int i = 0; i < 2; i++) {
             if (ff_inlink_queued_samples(ctx->inputs[i]) > 0)
                 continue;
@@ -166,7 +178,9 @@ const AVFilter ff_af_asdr = {
     .priv_size      = sizeof(AudioSDRContext),
     .activate       = activate,
     .uninit         = uninit,
-    .flags          = AVFILTER_FLAG_METADATA_ONLY,
+    .flags          = AVFILTER_FLAG_METADATA_ONLY |
+                      AVFILTER_FLAG_SLICE_THREADS |
+                      AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(outputs),
     FILTER_SINGLE_SAMPLEFMT(AV_SAMPLE_FMT_DBLP),

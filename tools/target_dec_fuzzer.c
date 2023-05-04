@@ -211,6 +211,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     case AV_CODEC_ID_AASC:        maxpixels  /= 1024;  break;
     case AV_CODEC_ID_AGM:         maxpixels  /= 1024;  break;
     case AV_CODEC_ID_ANM:         maxpixels  /= 1024;  break;
+    case AV_CODEC_ID_APE:         maxsamples /= 16384; break;
     case AV_CODEC_ID_ARBC:        maxpixels  /= 1024;  break;
     case AV_CODEC_ID_ARGO:        maxpixels  /= 1024;  break;
     case AV_CODEC_ID_BETHSOFTVID: maxpixels  /= 8192;  break;
@@ -227,11 +228,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     case AV_CODEC_ID_DVB_SUBTITLE: av_dict_set_int(&opts, "compute_clut", -2, 0); break;
     case AV_CODEC_ID_DXA:         maxpixels  /= 32;    break;
     case AV_CODEC_ID_DXV:         maxpixels  /= 32;    break;
+    case AV_CODEC_ID_EXR:         maxpixels  /= 1024;  break;
     case AV_CODEC_ID_FFV1:        maxpixels  /= 32;    break;
     case AV_CODEC_ID_FFWAVESYNTH: maxsamples /= 16384; break;
     case AV_CODEC_ID_FLAC:        maxsamples /= 1024;  break;
     case AV_CODEC_ID_FLIC:        maxpixels  /= 1024;  break;
     case AV_CODEC_ID_FLV1:        maxpixels  /= 1024;  break;
+    case AV_CODEC_ID_FMVC:        maxpixels  /= 1024;  break;
     case AV_CODEC_ID_G2M:         maxpixels  /= 1024;  break;
     case AV_CODEC_ID_GEM:         maxpixels  /= 512;   break;
     case AV_CODEC_ID_GDV:         maxpixels  /= 512;   break;
@@ -268,6 +271,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     case AV_CODEC_ID_QTRLE:       maxpixels  /= 16;    break;
     case AV_CODEC_ID_PAF_VIDEO:   maxpixels  /= 16;    break;
     case AV_CODEC_ID_PRORES:      maxpixels  /= 256;   break;
+    case AV_CODEC_ID_RKA:         maxsamples /= 256;   break;
     case AV_CODEC_ID_RSCC:        maxpixels  /= 256;   break;
     case AV_CODEC_ID_RASC:        maxpixels  /= 16;    break;
     case AV_CODEC_ID_SANM:        maxpixels  /= 16;    break;

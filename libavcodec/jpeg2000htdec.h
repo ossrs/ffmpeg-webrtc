@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Guo Yejun
+ * Copyright (c) 2022 Caleb Etemesi <etemesicaleb@gmail.com>
  *
  * This file is part of FFmpeg.
  *
@@ -18,27 +18,17 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#ifndef AVCODEC_JPEG2000HTDEC_H
+#define AVCODEC_JPEG2000HTDEC_H
+
+#include "jpeg2000dec.h"
+
 /**
- * @file
- * DNN inference functions interface for native backend.
+ * HT Block decoder as specified in Rec. ITU-T T.814 | ISO/IEC 15444-15
  */
 
+int ff_jpeg2000_decode_htj2k(const Jpeg2000DecoderContext *s, Jpeg2000CodingStyle *codsty,
+                            Jpeg2000T1Context *t1, Jpeg2000Cblk *cblk, int width,
+                            int height, int magp, uint8_t roi_shift);
 
-#ifndef AVFILTER_DNN_DNN_BACKEND_NATIVE_LAYER_MAXIMUM_H
-#define AVFILTER_DNN_DNN_BACKEND_NATIVE_LAYER_MAXIMUM_H
-
-#include "libavformat/avio.h"
-#include "dnn_backend_native.h"
-
-typedef struct DnnLayerMaximumParams{
-    union {
-        uint32_t u32;
-        float y;
-    }val;
-} DnnLayerMaximumParams;
-
-int ff_dnn_load_layer_maximum(Layer *layer, AVIOContext *model_file_context, int file_size, int operands_num);
-int ff_dnn_execute_layer_maximum(DnnOperand *operands, const int32_t *input_operand_indexes,
-                                 int32_t output_operand_index, const void *parameters, NativeContext *ctx);
-
-#endif
+#endif /* AVCODEC_JPEG2000HTDEC_H */
