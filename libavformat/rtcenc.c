@@ -179,11 +179,8 @@ static int isom_read_avcc(AVFormatContext *s, uint8_t *extradata, int  extradata
 
     /* Parse the SPS/PPS in ISOM format in extradata. */
     pb = avio_alloc_context(extradata, extradata_size, 0, NULL, NULL, NULL, NULL);
-    if (!pb) {
-        av_log(s, AV_LOG_ERROR, "Failed to alloc AVIOContext, size=%d\n", extradata_size);
-        ret = AVERROR(ENOMEM);
-        goto end;
-    }
+    if (!pb)
+        return AVERROR(ENOMEM);
 
     version = avio_r8(pb); /* version */
     avio_r8(pb); /* avc profile */
@@ -381,10 +378,8 @@ static int generate_sdp_offer(AVFormatContext *s)
     RTCContext *rtc = s->priv_data;
 
     char *tmp = av_mallocz(MAX_SDP_SIZE);
-    if (!tmp) {
-        av_log(s, AV_LOG_ERROR, "Failed to alloc answer: %s\n", s->url);
+    if (!tmp)
         return AVERROR(ENOMEM);
-    }
 
     if (rtc->sdp_offer) {
         av_log(s, AV_LOG_ERROR, "SDP offer is already set\n");
@@ -485,6 +480,10 @@ static int generate_sdp_offer(AVFormatContext *s)
     }
 
     rtc->sdp_offer = av_strdup(tmp);
+    if (!rtc->sdp_offer) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
     av_log(s, AV_LOG_VERBOSE, "WHIP: Generated offer: %s\n", rtc->sdp_offer);
 
 end:
@@ -542,10 +541,8 @@ static int exchange_sdp(AVFormatContext *s)
     URLContext *whip_uc = NULL;
 
     char *tmp = av_mallocz(MAX_SDP_SIZE);
-    if (!tmp) {
-        av_log(s, AV_LOG_ERROR, "Failed to alloc answer: %s\n", s->url);
+    if (!tmp)
         return AVERROR(ENOMEM);
-    }
 
     ret = ffurl_alloc(&whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
     if (ret < 0) {
@@ -596,6 +593,10 @@ static int exchange_sdp(AVFormatContext *s)
     }
 
     rtc->sdp_answer = av_strdup(tmp);
+    if (!rtc->sdp_answer) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
     av_log(s, AV_LOG_VERBOSE, "WHIP: Got answer: %s\n", rtc->sdp_answer);
 
 end:
@@ -619,18 +620,23 @@ static int parse_answer(AVFormatContext *s)
     RTCContext *rtc = s->priv_data;
 
     pb = avio_alloc_context(rtc->sdp_answer, strlen(rtc->sdp_answer), 0, NULL, NULL, NULL, NULL);
-    if (!pb) {
-        av_log(s, AV_LOG_ERROR, "Failed to alloc AVIOContext for answer: %s\n", rtc->sdp_answer);
-        ret = AVERROR(ENOMEM);
-        goto end;
-    }
+    if (!pb)
+        return AVERROR(ENOMEM);
 
     for (i = 0; !avio_feof(pb); i++) {
         ff_get_chomp_line(pb, line, sizeof(line));
         if (av_strstart(line, "a=ice-ufrag:", &ptr) && !rtc->ice_ufrag_remote) {
             rtc->ice_ufrag_remote = av_strdup(ptr);
+            if (!rtc->ice_ufrag_remote) {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
         } else if (av_strstart(line, "a=ice-pwd:", &ptr) && !rtc->ice_pwd_remote) {
             rtc->ice_pwd_remote = av_strdup(ptr);
+            if (!rtc->ice_pwd_remote) {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
         } else if (av_strstart(line, "a=candidate:", &ptr) && !rtc->ice_protocol) {
             ptr = av_stristr(ptr, "udp");
             if (ptr && av_stristr(ptr, "host")) {
@@ -654,6 +660,10 @@ static int parse_answer(AVFormatContext *s)
                 rtc->ice_protocol = av_strdup(protocol);
                 rtc->ice_host = av_strdup(host);
                 rtc->ice_port = port;
+                if (!rtc->ice_protocol || !rtc->ice_host) {
+                    ret = AVERROR(ENOMEM);
+                    goto end;
+                }
             }
         }
     }
@@ -682,15 +692,11 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     RTCContext *rtc = s->priv_data;
 
     pb = avio_alloc_context(buf, buf_size, 1, NULL, NULL, NULL, NULL);
-    if (!pb) {
-        av_log(s, AV_LOG_ERROR, "Failed to alloc AVIOContext for ICE\n");
-        ret = AVERROR(ENOMEM);
-        goto end;
-    }
+    if (!pb)
+        return AVERROR(ENOMEM);
 
     hmac = av_hmac_alloc(AV_HMAC_SHA1);
     if (!hmac) {
-        av_log(s, AV_LOG_ERROR, "Failed to alloc AVHMAC for ICE\n");
         ret = AVERROR(ENOMEM);
         goto end;
     }
@@ -1324,14 +1330,12 @@ static int create_rtp_muxer(AVFormatContext *s)
     for (i = 0; i < s->nb_streams; i++) {
         rtp_ctx = avformat_alloc_context();
         if (!rtp_ctx) {
-            av_log(s, AV_LOG_ERROR, "Failed to allocate rtp muxer\n");
             ret = AVERROR(ENOMEM);
             goto end;
         }
 
         rtp_ctx->oformat = rtp_format;
         if (!avformat_new_stream(rtp_ctx, NULL)) {
-            av_log(s, AV_LOG_ERROR, "Failed to create rtp stream\n");
             ret = AVERROR(ENOMEM);
             goto end;
         }
@@ -1353,7 +1357,6 @@ static int create_rtp_muxer(AVFormatContext *s)
         buffer = av_malloc(MAX_UDP_SIZE);
         rtp_ctx->pb = avio_alloc_context(buffer, MAX_UDP_SIZE, 1, s, NULL, write_packet, NULL);
         if (!rtp_ctx->pb) {
-            av_log(s, AV_LOG_ERROR, "Failed to allocate rtp pb\n");
             ret = AVERROR(ENOMEM);
             goto end;
         }
