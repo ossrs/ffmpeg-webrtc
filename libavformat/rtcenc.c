@@ -482,7 +482,7 @@ static int generate_sdp_offer(AVFormatContext *s)
     }
 
     rtc->sdp_offer = av_strdup(tmp);
-    av_log(s, AV_LOG_VERBOSE, "Generated offer: %s\n", rtc->sdp_offer);
+    av_log(s, AV_LOG_VERBOSE, "WHIP: Generated offer: %s\n", rtc->sdp_offer);
 
 end:
     av_free(tmp);
@@ -585,7 +585,7 @@ static int exchange_sdp(AVFormatContext *s)
     }
 
     rtc->sdp_answer = av_strdup(tmp);
-    av_log(s, AV_LOG_VERBOSE, "Got answer: %s\n", rtc->sdp_answer);
+    av_log(s, AV_LOG_VERBOSE, "WHIP: Got answer: %s\n", rtc->sdp_answer);
 
 end:
     ffurl_closep(&whip_uc);
@@ -647,7 +647,7 @@ static int parse_answer(AVFormatContext *s)
         }
     }
 
-    av_log(s, AV_LOG_INFO, "SDP offer=%luB, answer=%luB, ufrag=%s, pwd=%luB, transport=%s://%s:%d\n",
+    av_log(s, AV_LOG_INFO, "WHIP: SDP offer=%luB, answer=%luB, ufrag=%s, pwd=%luB, transport=%s://%s:%d\n",
         strlen(rtc->sdp_offer), strlen(rtc->sdp_answer), rtc->ice_ufrag_remote, strlen(rtc->ice_pwd_remote),
         rtc->ice_protocol, rtc->ice_host, rtc->ice_port);
 
@@ -811,7 +811,7 @@ static int ice_handshake(AVFormatContext *s)
         goto end;
     }
 
-    av_log(s, AV_LOG_INFO, "ICE STUN ok, url=udp://%s:%d, username=%s:%s, req=%dB, res=%dB, arq=%d\n",
+    av_log(s, AV_LOG_INFO, "WHIP: ICE STUN ok, url=udp://%s:%d, username=%s:%s, req=%dB, res=%dB, arq=%d\n",
         rtc->ice_host, rtc->ice_port, rtc->ice_ufrag_remote, rtc->ice_ufrag_local, size, ret,
         UDP_FAST_RETRIES - fast_retries);
     ret = 0;
@@ -915,7 +915,7 @@ static void openssl_state_trace(AVFormatContext *s, uint8_t *data, int length, i
         handshake_type = (uint8_t)data[13];
     }
 
-    av_log(s, AV_LOG_INFO, "DTLS: State %s %s, done=%u, arq=%u, r0=%d, r1=%d, len=%u, cnt=%u, size=%u, hs=%u\n",
+    av_log(s, AV_LOG_INFO, "WHIP: DTLS state %s %s, done=%u, arq=%u, r0=%d, r1=%d, len=%u, cnt=%u, size=%u, hs=%u\n",
         "Active", (incoming? "RECV":"SEND"), rtc->dtls_done_for_us, rtc->dtls_arq_packets, r0, r1, length,
         content_type, size, handshake_type);
 }
@@ -1155,7 +1155,7 @@ static int openssl_dtls_handshake(AVFormatContext *s)
         goto end;
     }
 
-    av_log(s, AV_LOG_INFO, "DTLS: Handshake done=%d, arq=%d, srtp_material=%luB\n",
+    av_log(s, AV_LOG_INFO, "WHIP: DTLS handshake done=%d, arq=%d, srtp_material=%luB\n",
         rtc->dtls_done_for_us, rtc->dtls_arq_packets, sizeof(rtc->dtls_srtp_material));
 
 end:
@@ -1222,7 +1222,7 @@ static int setup_srtp(AVFormatContext *s)
         goto end;
     }
 
-    av_log(s, AV_LOG_INFO, "SRTP: Setup done, suite=%s, key=%luB\n", suite, sizeof(send_key));
+    av_log(s, AV_LOG_INFO, "WHIP: SRTP setup done, suite=%s, key=%luB\n", suite, sizeof(send_key));
 
 end:
     return ret;
