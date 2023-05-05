@@ -128,8 +128,11 @@ typedef struct RTCContext {
     int ice_port;
     /* The SDP answer received from the WebRTC server. */
     char *sdp_answer;
+
     /* The resource URL returned in the Location header of WHIP HTTP response. */
     char *whip_resource_url;
+    /* Whether resource already disposed. */
+    int whip_disposed;
 
     /* Whether the timer should be reset. */
     int dtls_should_reset_timer;
@@ -1500,12 +1503,15 @@ end:
     return ret;
 }
 
-static int rtc_write_trailer(AVFormatContext *s)
+static int whip_dispose(AVFormatContext *s)
 {
     int ret;
     char buf[MAX_URL_SIZE];
     URLContext *whip_uc = NULL;
     RTCContext *rtc = s->priv_data;
+
+    if (!rtc->whip_resource_url || rtc->whip_disposed)
+        return 0;
 
     ret = ffurl_alloc(&whip_uc, rtc->whip_resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
     if (ret < 0) {
@@ -1533,17 +1539,25 @@ static int rtc_write_trailer(AVFormatContext *s)
         }
     }
 
-    av_log(s, AV_LOG_INFO, "WHIP: Dispose resource %s\n", rtc->whip_resource_url);
+    av_log(s, AV_LOG_INFO, "WHIP: Dispose resource %s, disposed=%d\n", rtc->whip_resource_url, rtc->whip_disposed);
+    rtc->whip_disposed = 1;
 
 end:
     ffurl_closep(&whip_uc);
     return ret;
 }
 
+static int rtc_write_trailer(AVFormatContext *s)
+{
+    return whip_dispose(s);
+}
+
 static av_cold void rtc_deinit(AVFormatContext *s)
 {
     int i;
     RTCContext *rtc = s->priv_data;
+
+    whip_dispose(s);
 
     for (i = 0; i < s->nb_streams; i++) {
         AVFormatContext* rtp_ctx = s->streams[i]->priv_data;
