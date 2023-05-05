@@ -50,6 +50,7 @@
 #include "libavutil/base64.h"
 #include "srtp.h"
 #include "avc.h"
+#include "http.h"
 
 /* The maximum size of an SDP, either offer or answer. */
 #define MAX_SDP_SIZE 8192
@@ -127,6 +128,8 @@ typedef struct RTCContext {
     int ice_port;
     /* The SDP answer received from the WebRTC server. */
     char *sdp_answer;
+    /* The resource URL returned in the Location header of WHIP HTTP response. */
+    char *whip_resource_url;
 
     /* Whether the timer should be reset. */
     int dtls_should_reset_timer;
@@ -561,6 +564,14 @@ static int exchange_sdp(AVFormatContext *s)
     if (ret < 0) {
         av_log(s, AV_LOG_ERROR, "Failed to request url=%s, offer: %s\n", s->url, rtc->sdp_offer);
         goto end;
+    }
+
+    if (ff_http_get_new_location(whip_uc)) {
+        rtc->whip_resource_url = av_strdup(ff_http_get_new_location(whip_uc));
+        if (!rtc->whip_resource_url) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
     }
 
     while (1) {
@@ -1488,7 +1499,42 @@ end:
 
 static int rtc_write_trailer(AVFormatContext *s)
 {
-    return 0;
+    int ret;
+    char buf[MAX_URL_SIZE];
+    URLContext *whip_uc = NULL;
+    RTCContext *rtc = s->priv_data;
+
+    ret = ffurl_alloc(&whip_uc, rtc->whip_resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to alloc WHIP delete context: %s\n", s->url);
+        goto end;
+    }
+
+    av_opt_set(whip_uc->priv_data, "chunked_post", "0", 0);
+    av_opt_set(whip_uc->priv_data, "method", "DELETE", 0);
+    ret = ffurl_connect(whip_uc, NULL);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to DELETE url=%s\n", rtc->whip_resource_url);
+        goto end;
+    }
+
+    while (1) {
+        ret = ffurl_read(whip_uc, buf, sizeof(buf));
+        if (ret == AVERROR_EOF) {
+            ret = 0;
+            break;
+        }
+        if (ret < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to read response from DELETE url=%s\n", rtc->whip_resource_url);
+            goto end;
+        }
+    }
+
+    av_log(s, AV_LOG_INFO, "WHIP: Dispose resource %s\n", rtc->whip_resource_url);
+
+end:
+    ffurl_closep(&whip_uc);
+    return ret;
 }
 
 static av_cold void rtc_deinit(AVFormatContext *s)
@@ -1511,6 +1557,7 @@ static av_cold void rtc_deinit(AVFormatContext *s)
     av_freep(&rtc->avc_pps);
     av_freep(&rtc->sdp_offer);
     av_freep(&rtc->sdp_answer);
+    av_freep(&rtc->whip_resource_url);
     av_freep(&rtc->ice_ufrag_remote);
     av_freep(&rtc->ice_pwd_remote);
     av_freep(&rtc->ice_protocol);
