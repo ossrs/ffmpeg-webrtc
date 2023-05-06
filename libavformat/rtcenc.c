@@ -120,11 +120,8 @@ typedef struct RTCContext {
     int ice_port;
     /* The SDP answer received from the WebRTC server. */
     char *sdp_answer;
-
     /* The resource URL returned in the Location header of WHIP HTTP response. */
     char *whip_resource_url;
-    /* Whether resource already disposed. */
-    int whip_disposed;
 
     /* Whether the timer should be reset. */
     int dtls_should_reset_timer;
@@ -162,6 +159,8 @@ typedef struct RTCContext {
     /* The size of RTP packet, should generally be set to MTU. */
     int pkt_size;
 } RTCContext;
+
+static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size);
 
 /* Parse SPS/PPS from ISOM AVCC, see ff_isom_write_avcc */
 static int isom_read_avcc(AVFormatContext *s, uint8_t *extradata, int  extradata_size)
@@ -945,7 +944,7 @@ static void openssl_state_trace(AVFormatContext *s, uint8_t *data, int length, i
         handshake_type = (uint8_t)data[13];
     }
 
-    av_log(s, AV_LOG_INFO, "WHIP: DTLS state %s %s, done=%u, arq=%u, r0=%d, r1=%d, len=%u, cnt=%u, size=%u, hs=%u\n",
+    av_log(s, AV_LOG_VERBOSE, "WHIP: DTLS state %s %s, done=%u, arq=%u, r0=%d, r1=%d, len=%u, cnt=%u, size=%u, hs=%u\n",
         "Active", (incoming? "RECV":"SEND"), rtc->dtls_done_for_us, rtc->dtls_arq_packets, r0, r1, length,
         content_type, size, handshake_type);
 }
@@ -1265,7 +1264,102 @@ end:
     return ret;
 }
 
-static int write_packet(void *opaque, uint8_t *buf, int buf_size)
+/**
+ * Create a RTP muxer to build RTP packets from the encoded frames.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int create_rtp_muxer(AVFormatContext *s)
+{
+    int ret, i, is_video, buffer_size, max_packet_size;
+    AVFormatContext *rtp_ctx = NULL;
+    AVDictionary *opts = NULL;
+    uint8_t *buffer = NULL;
+    char buf[64];
+    RTCContext *rtc = s->priv_data;
+
+    const AVOutputFormat *rtp_format = av_guess_format("rtp", NULL, NULL);
+    if (!rtp_format) {
+        av_log(s, AV_LOG_ERROR, "Failed to guess rtp muxer\n");
+        ret = AVERROR(ENOSYS);
+        goto end;
+    }
+
+    /* The UDP buffer size, may greater than MTU. */
+    buffer_size = MAX_UDP_BUFFER_SIZE;
+    /* The RTP payload max size. Reserved some bytes for SRTP checksum and padding. */
+    max_packet_size = rtc->pkt_size - DTLS_SRTP_CHECKSUM_LEN;
+
+    for (i = 0; i < s->nb_streams; i++) {
+        rtp_ctx = avformat_alloc_context();
+        if (!rtp_ctx) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+
+        rtp_ctx->oformat = rtp_format;
+        if (!avformat_new_stream(rtp_ctx, NULL)) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        /* Pass the interrupt callback on */
+        rtp_ctx->interrupt_callback = s->interrupt_callback;
+        /* Copy the max delay setting; the rtp muxer reads this. */
+        rtp_ctx->max_delay = s->max_delay;
+        /* Copy other stream parameters. */
+        rtp_ctx->streams[0]->sample_aspect_ratio = s->streams[i]->sample_aspect_ratio;
+        rtp_ctx->flags |= s->flags & AVFMT_FLAG_BITEXACT;
+        rtp_ctx->strict_std_compliance = s->strict_std_compliance;
+
+        /* Set the synchronized start time. */
+        rtp_ctx->start_time_realtime = s->start_time_realtime;
+
+        avcodec_parameters_copy(rtp_ctx->streams[0]->codecpar, s->streams[i]->codecpar);
+        rtp_ctx->streams[0]->time_base = s->streams[i]->time_base;
+
+        buffer = av_malloc(buffer_size);
+        rtp_ctx->pb = avio_alloc_context(buffer, buffer_size, 1, s, NULL, on_rtp_write_packet, NULL);
+        if (!rtp_ctx->pb) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        rtp_ctx->pb->max_packet_size = max_packet_size;
+        rtp_ctx->pb->av_class = &ff_avio_class;
+
+        is_video = s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+        snprintf(buf, sizeof(buf), "%d", is_video? rtc->video_payload_type : rtc->audio_payload_type);
+        av_dict_set(&opts, "payload_type", buf, 0);
+        snprintf(buf, sizeof(buf), "%d", is_video? rtc->video_ssrc : rtc->audio_ssrc);
+        av_dict_set(&opts, "ssrc", buf, 0);
+        av_dict_set(&opts, "rtpflags", "4", 0); /* FF_RTP_FLAG_SKIP_RTCP */
+
+        ret = avformat_write_header(rtp_ctx, &opts);
+        if (ret < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to write rtp header\n");
+            goto end;
+        }
+
+        ff_format_set_url(rtp_ctx, av_strdup(s->url));
+        s->streams[i]->time_base = rtp_ctx->streams[0]->time_base;
+        s->streams[i]->priv_data = rtp_ctx;
+        rtp_ctx = NULL;
+    }
+
+    av_log(s, AV_LOG_INFO, "WHIP: Create RTP muxer OK, buffer_size=%d, max_packet_size=%d\n",
+        buffer_size, max_packet_size);
+
+end:
+    if (rtp_ctx)
+        avio_context_free(&rtp_ctx->pb);
+    avformat_free_context(rtp_ctx);
+    av_dict_free(&opts);
+    return ret;
+}
+
+/**
+ * When RTP muxer builds and outputs a RTP packet, this callback will be called.
+ */
+static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
 {
     int ret, cipher_size, is_rtcp;
     uint8_t payload_type, nalu_header;
@@ -1327,94 +1421,116 @@ static int write_packet(void *opaque, uint8_t *buf, int buf_size)
 }
 
 /**
- * Create a RTP muxer to build RTP packets from the encoded frames.
- *
- * @return 0 if OK, AVERROR_xxx on error
+ * Insert the SPS/PPS before each IDR frame.
  */
-static int create_rtp_muxer(AVFormatContext *s)
+static int insert_sps_pps_packet(AVFormatContext *s, AVPacket *pkt)
 {
-    int ret, i, is_video, buffer_size, max_packet_size;
-    AVFormatContext *rtp_ctx = NULL;
-    AVDictionary *opts = NULL;
-    uint8_t *buffer = NULL;
-    char buf[64];
+    int ret, is_idr, size, i;
+    uint8_t *p;
+    AVPacket* extra = NULL;
+    AVStream *st = s->streams[pkt->stream_index];
+    AVFormatContext *rtp_ctx = st->priv_data;
     RTCContext *rtc = s->priv_data;
 
-    const AVOutputFormat *rtp_format = av_guess_format("rtp", NULL, NULL);
-    if (!rtp_format) {
-        av_log(s, AV_LOG_ERROR, "Failed to guess rtp muxer\n");
-        ret = AVERROR(ENOSYS);
+    is_idr = (pkt->flags & AV_PKT_FLAG_KEY) && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+    if (!is_idr || !st->codecpar->extradata)
+        return 0;
+
+    extra = av_packet_alloc();
+    if (!extra)
+        return AVERROR(ENOMEM);
+
+    size = !rtc->avc_nal_length_size ? st->codecpar->extradata_size :
+            rtc->avc_nal_length_size * 2 + rtc->avc_sps_size + rtc->avc_pps_size;
+    ret = av_new_packet(extra, size);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to allocate extra packet\n");
         goto end;
     }
 
-    /* The UDP buffer size, may greater than MTU. */
-    buffer_size = MAX_UDP_BUFFER_SIZE;
-    /* The RTP payload max size. Reserved some bytes for SRTP checksum and padding. */
-    max_packet_size = rtc->pkt_size - DTLS_SRTP_CHECKSUM_LEN;
-
-    for (i = 0; i < s->nb_streams; i++) {
-        rtp_ctx = avformat_alloc_context();
-        if (!rtp_ctx) {
-            ret = AVERROR(ENOMEM);
-            goto end;
+    /* Encode SPS/PPS in annexb format. */
+    if (!rtc->avc_nal_length_size) {
+        memcpy(extra->data, st->codecpar->extradata, size);
+    } else {
+        /* Encode SPS/PPS in ISOM format. */
+        p = extra->data;
+        for (i = 0; i < rtc->avc_nal_length_size; i++) {
+            *p++ = rtc->avc_sps_size >> (8 * (rtc->avc_nal_length_size - i - 1));
         }
+        memcpy(p, rtc->avc_sps, rtc->avc_sps_size);
+        p += rtc->avc_sps_size;
 
-        rtp_ctx->oformat = rtp_format;
-        if (!avformat_new_stream(rtp_ctx, NULL)) {
-            ret = AVERROR(ENOMEM);
-            goto end;
+        /* Encode PPS in ISOM format. */
+        for (i = 0; i < rtc->avc_nal_length_size; i++) {
+            *p++ = rtc->avc_pps_size >> (8 * (rtc->avc_nal_length_size - i - 1));
         }
-        /* Pass the interrupt callback on */
-        rtp_ctx->interrupt_callback = s->interrupt_callback;
-        /* Copy the max delay setting; the rtp muxer reads this. */
-        rtp_ctx->max_delay = s->max_delay;
-        /* Copy other stream parameters. */
-        rtp_ctx->streams[0]->sample_aspect_ratio = s->streams[i]->sample_aspect_ratio;
-        rtp_ctx->flags |= s->flags & AVFMT_FLAG_BITEXACT;
-        rtp_ctx->strict_std_compliance = s->strict_std_compliance;
-
-        /* Set the synchronized start time. */
-        rtp_ctx->start_time_realtime = s->start_time_realtime;
-
-        avcodec_parameters_copy(rtp_ctx->streams[0]->codecpar, s->streams[i]->codecpar);
-        rtp_ctx->streams[0]->time_base = s->streams[i]->time_base;
-
-        buffer = av_malloc(buffer_size);
-        rtp_ctx->pb = avio_alloc_context(buffer, buffer_size, 1, s, NULL, write_packet, NULL);
-        if (!rtp_ctx->pb) {
-            ret = AVERROR(ENOMEM);
-            goto end;
-        }
-        rtp_ctx->pb->max_packet_size = max_packet_size;
-        rtp_ctx->pb->av_class = &ff_avio_class;
-
-        is_video = s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
-        snprintf(buf, sizeof(buf), "%d", is_video? rtc->video_payload_type : rtc->audio_payload_type);
-        av_dict_set(&opts, "payload_type", buf, 0);
-        snprintf(buf, sizeof(buf), "%d", is_video? rtc->video_ssrc : rtc->audio_ssrc);
-        av_dict_set(&opts, "ssrc", buf, 0);
-        av_dict_set(&opts, "rtpflags", "4", 0); /* FF_RTP_FLAG_SKIP_RTCP */
-
-        ret = avformat_write_header(rtp_ctx, &opts);
-        if (ret < 0) {
-            av_log(s, AV_LOG_ERROR, "Failed to write rtp header\n");
-            goto end;
-        }
-
-        ff_format_set_url(rtp_ctx, av_strdup(s->url));
-        s->streams[i]->time_base = rtp_ctx->streams[0]->time_base;
-        s->streams[i]->priv_data = rtp_ctx;
-        rtp_ctx = NULL;
+        memcpy(p, rtc->avc_pps, rtc->avc_pps_size);
+        p += rtc->avc_pps_size;
     }
 
-    av_log(s, AV_LOG_INFO, "WHIP: Create RTP muxer OK, buffer_size=%d, max_packet_size=%d\n",
-        buffer_size, max_packet_size);
+    /* Setup packet and feed it to chain. */
+    extra->pts = pkt->pts;
+    extra->dts = pkt->dts;
+    extra->stream_index = pkt->stream_index;
+    extra->time_base = pkt->time_base;
+
+    ret = ff_write_chained(rtp_ctx, 0, extra, s, 0);
+    if (ret < 0)
+        goto end;
 
 end:
-    if (rtp_ctx)
-        avio_context_free(&rtp_ctx->pb);
-    avformat_free_context(rtp_ctx);
-    av_dict_free(&opts);
+    av_packet_free(&extra);
+    return ret;
+}
+
+/**
+ * RTC is connectionless, for it's based on UDP, so it check whether sesison is
+ * timeout. In such case, publishers can't republish the stream util the session
+ * is timeout.
+ * This function is called to notify the server that the stream is ended, server
+ * should expire and close the session immediately, so that publishers can republish
+ * the stream quickly.
+ */
+static int whip_dispose(AVFormatContext *s)
+{
+    int ret;
+    char buf[MAX_URL_SIZE];
+    URLContext *whip_uc = NULL;
+    RTCContext *rtc = s->priv_data;
+
+    if (!rtc->whip_resource_url)
+        return 0;
+
+    ret = ffurl_alloc(&whip_uc, rtc->whip_resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to alloc WHIP delete context: %s\n", s->url);
+        goto end;
+    }
+
+    av_opt_set(whip_uc->priv_data, "chunked_post", "0", 0);
+    av_opt_set(whip_uc->priv_data, "method", "DELETE", 0);
+    ret = ffurl_connect(whip_uc, NULL);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to DELETE url=%s\n", rtc->whip_resource_url);
+        goto end;
+    }
+
+    while (1) {
+        ret = ffurl_read(whip_uc, buf, sizeof(buf));
+        if (ret == AVERROR_EOF) {
+            ret = 0;
+            break;
+        }
+        if (ret < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to read response from DELETE url=%s\n", rtc->whip_resource_url);
+            goto end;
+        }
+    }
+
+    av_log(s, AV_LOG_INFO, "WHIP: Dispose resource %s\n", rtc->whip_resource_url);
+
+end:
+    ffurl_closep(&whip_uc);
     return ret;
 }
 
@@ -1472,9 +1588,7 @@ static int rtc_write_header(AVFormatContext *s)
 
 static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
 {
-    int ret, size, is_idr, i;
-    AVPacket* extra = NULL;
-    uint8_t *p;
+    int ret;
     RTCContext *rtc = s->priv_data;
     AVStream *st = s->streams[pkt->stream_index];
     AVFormatContext *rtp_ctx = st->priv_data;
@@ -1487,47 +1601,10 @@ static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
         rtc->audio_jitter_base += 960;
     }
 
-    /* Insert a packet with SPS/PPS before each IDR frame. */
-    is_idr = (pkt->flags & AV_PKT_FLAG_KEY) && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
-    if (is_idr && st->codecpar->extradata) {
-        extra = av_packet_alloc();
-        size = !rtc->avc_nal_length_size ? st->codecpar->extradata_size :
-                rtc->avc_nal_length_size * 2 + rtc->avc_sps_size + rtc->avc_pps_size;
-        ret = av_new_packet(extra, size);
-        if (ret < 0) {
-            av_log(s, AV_LOG_ERROR, "Failed to allocate extra packet\n");
-            return ret;
-        }
-
-        /* Encode SPS/PPS in annexb format. */
-        if (!rtc->avc_nal_length_size) {
-            memcpy(extra->data, st->codecpar->extradata, size);
-        } else {
-            /* Encode SPS/PPS in ISOM format. */
-            p = extra->data;
-            for (i = 0; i < rtc->avc_nal_length_size; i++) {
-                *p++ = rtc->avc_sps_size >> (8 * (rtc->avc_nal_length_size - i - 1));
-            }
-            memcpy(p, rtc->avc_sps, rtc->avc_sps_size);
-            p += rtc->avc_sps_size;
-
-            /* Encode PPS in ISOM format. */
-            for (i = 0; i < rtc->avc_nal_length_size; i++) {
-                *p++ = rtc->avc_pps_size >> (8 * (rtc->avc_nal_length_size - i - 1));
-            }
-            memcpy(p, rtc->avc_pps, rtc->avc_pps_size);
-            p += rtc->avc_pps_size;
-        }
-
-        /* Setup packet and feed it to chain. */
-        extra->pts = pkt->pts;
-        extra->dts = pkt->dts;
-        extra->stream_index = pkt->stream_index;
-        extra->time_base = pkt->time_base;
-
-        ret = ff_write_chained(rtp_ctx, 0, extra, s, 0);
-        if (ret < 0)
-            goto end;
+    ret = insert_sps_pps_packet(s, pkt);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to insert SPS/PPS packet\n");
+        return ret;
     }
 
     ret = ff_write_chained(rtp_ctx, 0, pkt, s, 0);
@@ -1538,55 +1615,9 @@ static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
         } else {
             av_log(s, AV_LOG_ERROR, "Failed to write packet, size=%d\n", pkt->size);
         }
-        goto end;
+        return ret;
     }
 
-end:
-    av_packet_free(&extra);
-    return ret;
-}
-
-static int whip_dispose(AVFormatContext *s)
-{
-    int ret;
-    char buf[MAX_URL_SIZE];
-    URLContext *whip_uc = NULL;
-    RTCContext *rtc = s->priv_data;
-
-    if (!rtc->whip_resource_url || rtc->whip_disposed)
-        return 0;
-
-    ret = ffurl_alloc(&whip_uc, rtc->whip_resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
-    if (ret < 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to alloc WHIP delete context: %s\n", s->url);
-        goto end;
-    }
-
-    av_opt_set(whip_uc->priv_data, "chunked_post", "0", 0);
-    av_opt_set(whip_uc->priv_data, "method", "DELETE", 0);
-    ret = ffurl_connect(whip_uc, NULL);
-    if (ret < 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to DELETE url=%s\n", rtc->whip_resource_url);
-        goto end;
-    }
-
-    while (1) {
-        ret = ffurl_read(whip_uc, buf, sizeof(buf));
-        if (ret == AVERROR_EOF) {
-            ret = 0;
-            break;
-        }
-        if (ret < 0) {
-            av_log(s, AV_LOG_ERROR, "Failed to read response from DELETE url=%s\n", rtc->whip_resource_url);
-            goto end;
-        }
-    }
-
-    av_log(s, AV_LOG_INFO, "WHIP: Dispose resource %s, disposed=%d\n", rtc->whip_resource_url, rtc->whip_disposed);
-    rtc->whip_disposed = 1;
-
-end:
-    ffurl_closep(&whip_uc);
     return ret;
 }
 
@@ -1637,7 +1668,7 @@ static const AVOption options[] = {
 };
 
 static const AVClass rtc_muxer_class = {
-    .class_name = "RTC WHIP muxer",
+    .class_name = "WebRTC muxer",
     .item_name  = av_default_item_name,
     .option     = options,
     .version    = LIBAVUTIL_VERSION_INT,
@@ -1645,7 +1676,7 @@ static const AVClass rtc_muxer_class = {
 
 const FFOutputFormat ff_rtc_muxer = {
     .p.name             = "rtc",
-    .p.long_name        = NULL_IF_CONFIG_SMALL("WebRTC WHIP muxer"),
+    .p.long_name        = NULL_IF_CONFIG_SMALL("WHIP WebRTC muxer"),
     .p.audio_codec      = AV_CODEC_ID_OPUS,
     .p.video_codec      = AV_CODEC_ID_H264,
     .p.flags            = AVFMT_GLOBALHEADER | AVFMT_NOFILE,
