@@ -54,25 +54,12 @@
 
 /* The maximum size of an SDP, either offer or answer. */
 #define MAX_SDP_SIZE 8192
-/* The maximum size of a UDP packet, should be smaller than the MTU. */
-#define MAX_UDP_SIZE 1500
-/**
- * The RTP payload max size, reserved some paddings for SRTP as such:
- *      kRtpPacketSize = kRtpMaxPayloadSize + paddings
- * For example, if kRtpPacketSize is 1500, recommend to set kRtpMaxPayloadSize to 1400,
- * which reserves 100 bytes for SRTP or paddings.
- * otherwise, the kRtpPacketSize must less than MTU, in webrtc source code,
- * the rtp max size is assigned by kVideoMtu = 1200.
- * so we set kRtpMaxPayloadSize = 1200.
- * see @doc https://groups.google.com/g/discuss-webrtc/c/gH5ysR3SoZI
- */
-#define MAX_UDP_PAYLOAD_SIZE (MAX_UDP_SIZE - 300)
-/* The maximum number of retries for UDP transmission. */
-#define UDP_FAST_RETRIES 6
-/* The startup timeout for UDP transmission. */
-#define UDP_START_TIMEOUT 21
-/* Avoid dtls negotiate failed, set max fragment size 1200. */
-#define DTLS_FRAGMENT_MAX_SIZE 1200
+/* The maximum size of the buffer for sending or receiving a UDP packet. */
+#define MAX_UDP_BUFFER_SIZE 1500
+/* The RTP payload max size. Reserved some bytes for SRTP checksum and padding. */
+#define MAX_UDP_PAYLOAD_SIZE 1200
+/* Avoid dtls negotiate failed, limit the max size of DTLS fragment. */
+#define MAX_DTLS_FRAGMENT_SIZE 1200
 /* Supported DTLS cipher suites. */
 #define DTLS_CIPHER_SUTES "ECDHE-ECDSA-AES128-GCM-SHA256"\
     ":ECDHE-RSA-AES128-GCM-SHA256"\
@@ -84,6 +71,13 @@
 #define DTLS_SRTP_MASTER_KEY_LEN 30
 /* The NALU type for STAP-A */
 #define NALU_TYPE_STAP_A 24
+
+/* The maximum number of retries and step start timeout in ms for ICE transmission. */
+#define ICE_ARQ_MAX 6
+#define ICE_ARQ_STEP_TIMEOUT 21
+/* The maximum number of retries and interval in ms for DTLS transmission. */
+#define DTLS_ARQ_MAX 6
+#define DTLS_ARQ_INTERVAL 21
 
 typedef struct RTCContext {
     AVClass *av_class;
@@ -766,8 +760,8 @@ end:
  */
 static int ice_handshake(AVFormatContext *s)
 {
-    int ret, size, fast_retries = UDP_FAST_RETRIES, timeout = UDP_START_TIMEOUT;
-    char url[256], buf[MAX_UDP_SIZE];
+    int ret, size, fast_retries = ICE_ARQ_MAX, timeout = ICE_ARQ_STEP_TIMEOUT;
+    char url[256], buf[MAX_UDP_BUFFER_SIZE];
     RTCContext *rtc = s->priv_data;
 
     /* Build UDP URL and create the UDP context as transport. */
@@ -820,7 +814,7 @@ static int ice_handshake(AVFormatContext *s)
                 fast_retries--;
                 continue;
             }
-            av_log(s, AV_LOG_ERROR, "Failed to read STUN binding response, retries=%d\n", UDP_FAST_RETRIES);
+            av_log(s, AV_LOG_ERROR, "Failed to read STUN binding response, retries=%d\n", ICE_ARQ_MAX);
             goto end;
         }
     } while (ret < 0);
@@ -833,7 +827,7 @@ static int ice_handshake(AVFormatContext *s)
 
     av_log(s, AV_LOG_INFO, "WHIP: ICE STUN ok, url=udp://%s:%d, username=%s:%s, req=%dB, res=%dB, arq=%d\n",
         rtc->ice_host, rtc->ice_port, rtc->ice_ufrag_remote, rtc->ice_ufrag_local, size, ret,
-        UDP_FAST_RETRIES - fast_retries);
+        ICE_ARQ_MAX - fast_retries);
     ret = 0;
 
 end:
@@ -1018,14 +1012,14 @@ static av_cold int openssl_init_dtls(AVFormatContext *s, SSL *dtls, SSL_CTX *dtl
 
     /* Set dtls fragment size */
     SSL_set_options(dtls, SSL_OP_NO_QUERY_MTU);
-    SSL_set_mtu(dtls, DTLS_FRAGMENT_MAX_SIZE);
+    SSL_set_mtu(dtls, MAX_DTLS_FRAGMENT_SIZE);
 
     /* Set the callback for ARQ timer. */
     DTLS_set_timer_cb(dtls, openssl_dtls_timer_cb);
 
     /* Setup DTLS as active, which is client role. */
     SSL_set_connect_state(dtls);
-    SSL_set_max_send_fragment(dtls, DTLS_FRAGMENT_MAX_SIZE);
+    SSL_set_max_send_fragment(dtls, MAX_DTLS_FRAGMENT_SIZE);
 
 end:
     EC_GROUP_free(ecgroup);
@@ -1036,7 +1030,7 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
 {
     int ret, i, j, r0, r1, req_size, res_size = 0;
     uint8_t *data = NULL, req_ct = 0, req_ht = 0, res_ct = 0, res_ht = 0;
-    char buf[MAX_UDP_SIZE];
+    char buf[MAX_UDP_BUFFER_SIZE];
     RTCContext *rtc = s->priv_data;
 
     /* Drive the SSL context by state change, arq or response messages. */
@@ -1056,7 +1050,7 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
     }
 
     /* Fast retransmit the request util got response. */
-    for (i = 0; i < UDP_FAST_RETRIES && !res_size; i++) {
+    for (i = 0; i < DTLS_ARQ_MAX && !res_size; i++) {
         req_size = BIO_get_mem_data(bio_out, (char**)&data);
         openssl_state_trace(s, data, req_size, 0, r0, r1);
         ret = ffurl_write(rtc->udp_uc, data, req_size);
@@ -1069,7 +1063,7 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
             return ret;
         }
 
-        for (j = 0; j < UDP_FAST_RETRIES && !res_size; j++) {
+        for (j = 0; j < DTLS_ARQ_MAX && !res_size; j++) {
             ret = ffurl_read(rtc->udp_uc, buf, sizeof(buf));
             /* Got response successfully. */
             if (ret > 0) {
@@ -1091,7 +1085,7 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
              * occurs, it returns -1. */
             r0 = DTLSv1_handle_timeout(dtls);
             if (!r0) {
-                av_usleep(UDP_START_TIMEOUT * 1000);
+                av_usleep(DTLS_ARQ_INTERVAL * 1000);
                 continue; /* no timeout had expired. */
             }
             if (r0 != 1) {
@@ -1252,7 +1246,7 @@ static int write_packet(void *opaque, uint8_t *buf, int buf_size)
 {
     int ret, cipher_size, is_rtcp;
     uint8_t payload_type, nalu_header;
-    char cipher[MAX_UDP_SIZE];
+    char cipher[MAX_UDP_BUFFER_SIZE];
     AVFormatContext *s = opaque;
     RTCContext *rtc = s->priv_data;
     struct SRTPContext *srtp;
@@ -1357,8 +1351,8 @@ static int create_rtp_muxer(AVFormatContext *s)
         avcodec_parameters_copy(rtp_ctx->streams[0]->codecpar, s->streams[i]->codecpar);
         rtp_ctx->streams[0]->time_base = s->streams[i]->time_base;
 
-        buffer = av_malloc(MAX_UDP_SIZE);
-        rtp_ctx->pb = avio_alloc_context(buffer, MAX_UDP_SIZE, 1, s, NULL, write_packet, NULL);
+        buffer = av_malloc(MAX_UDP_BUFFER_SIZE);
+        rtp_ctx->pb = avio_alloc_context(buffer, MAX_UDP_BUFFER_SIZE, 1, s, NULL, write_packet, NULL);
         if (!rtp_ctx->pb) {
             ret = AVERROR(ENOMEM);
             goto end;
