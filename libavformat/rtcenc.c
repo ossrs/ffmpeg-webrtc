@@ -1590,17 +1590,14 @@ end:
     return ret;
 }
 
-static int rtc_write_trailer(AVFormatContext *s)
-{
-    return whip_dispose(s);
-}
-
 static av_cold void rtc_deinit(AVFormatContext *s)
 {
-    int i;
+    int i, ret;
     RTCContext *rtc = s->priv_data;
 
-    whip_dispose(s);
+    ret = whip_dispose(s);
+    if (ret < 0)
+        av_log(s, AV_LOG_WARNING, "Failed to dispose resource, ret=%d\n", ret);
 
     for (i = 0; i < s->nb_streams; i++) {
         AVFormatContext* rtp_ctx = s->streams[i]->priv_data;
@@ -1657,6 +1654,5 @@ const FFOutputFormat ff_rtc_muxer = {
     .init               = rtc_init,
     .write_header       = rtc_write_header,
     .write_packet       = rtc_write_packet,
-    .write_trailer      = rtc_write_trailer,
     .deinit             = rtc_deinit,
 };
