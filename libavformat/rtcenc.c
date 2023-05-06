@@ -55,11 +55,7 @@
 /* The maximum size of an SDP, either offer or answer. */
 #define MAX_SDP_SIZE 8192
 /* The maximum size of the buffer for sending or receiving a UDP packet. */
-#define MAX_UDP_BUFFER_SIZE 1500
-/* The RTP payload max size. Reserved some bytes for SRTP checksum and padding. */
-#define MAX_UDP_PAYLOAD_SIZE 1200
-/* Avoid dtls negotiate failed, limit the max size of DTLS fragment. */
-#define MAX_DTLS_FRAGMENT_SIZE 1200
+#define MAX_UDP_BUFFER_SIZE 4096
 /* Supported DTLS cipher suites. */
 #define DTLS_CIPHER_SUTES "ECDHE-ECDSA-AES128-GCM-SHA256"\
     ":ECDHE-RSA-AES128-GCM-SHA256"\
@@ -69,15 +65,17 @@
     ":ECDHE-RSA-AES256-SHA"
 /* The SRTP key size, defined by SRTP_MASTER_KEY_LEN */
 #define DTLS_SRTP_MASTER_KEY_LEN 30
+/* The maximum size of SRTP hmac checksum and padding. */
+#define DTLS_SRTP_CHECKSUM_LEN 16
 /* The NALU type for STAP-A */
 #define NALU_TYPE_STAP_A 24
 
-/* The maximum number of retries and step start timeout in ms for ICE transmission. */
-#define ICE_ARQ_MAX 6
-#define ICE_ARQ_STEP_TIMEOUT 21
-/* The maximum number of retries and interval in ms for DTLS transmission. */
-#define DTLS_ARQ_MAX 6
-#define DTLS_ARQ_INTERVAL 21
+/* Wait for a small timeout in ms to let server processing the ICE request. */
+#define ICE_PROCESSING_TIMEOUT 10
+/* Wait for a small timeout in ms to let server processing the DTLS request. */
+#define DTLS_PROCESSING_TIMEOUT 30
+/* The maximum number of retries for DTLS EGAIN. */
+#define DTLS_EAGAIN_RETRIES_MAX 5
 
 typedef struct RTCContext {
     AVClass *av_class;
@@ -152,6 +150,17 @@ typedef struct RTCContext {
 
     /* The UDP transport is used for delivering ICE, DTLS and SRTP packets. */
     URLContext *udp_uc;
+
+    /* The maximum number of retries for ICE transmission. */
+    int ice_arq_max;
+    /* The step start timeout in ms for ICE transmission. */
+    int ice_arq_timeout;
+    /* The maximum number of retries for DTLS transmission. */
+    int dtls_arq_max;
+    /* The step start timeout in ms for DTLS transmission. */
+    int dtls_arq_timeout;
+    /* The size of RTP packet, should generally be set to MTU. */
+    int pkt_size;
 } RTCContext;
 
 /* Parse SPS/PPS from ISOM AVCC, see ff_isom_write_avcc */
@@ -760,9 +769,10 @@ end:
  */
 static int ice_handshake(AVFormatContext *s)
 {
-    int ret, size, fast_retries = ICE_ARQ_MAX, timeout = ICE_ARQ_STEP_TIMEOUT;
+    int ret, size;
     char url[256], buf[MAX_UDP_BUFFER_SIZE];
     RTCContext *rtc = s->priv_data;
+    int fast_retries = rtc->ice_arq_max, timeout = rtc->ice_arq_timeout;
 
     /* Build UDP URL and create the UDP context as transport. */
     ff_url_join(url, sizeof(url), "udp", NULL, rtc->ice_host, rtc->ice_port, NULL);
@@ -774,6 +784,9 @@ static int ice_handshake(AVFormatContext *s)
 
     av_opt_set(rtc->udp_uc->priv_data, "connect", "1", 0);
     av_opt_set(rtc->udp_uc->priv_data, "fifo_size", "0", 0);
+    /* Set the max packet size to the buffer size. */
+    snprintf(buf, sizeof(buf), "%d", rtc->pkt_size);
+    av_opt_set(rtc->udp_uc->priv_data, "pkt_size", buf, 0);
 
     ret = ffurl_connect(rtc->udp_uc, NULL);
     if (ret < 0) {
@@ -800,21 +813,24 @@ static int ice_handshake(AVFormatContext *s)
             goto end;
         }
 
-        /* If max retries is 6 and start timeout is 21ms, the total timeout
-         * is about 21 + 42 + 84 + 168 + 336 + 672 = 1263ms. */
-        if (fast_retries) {
-            av_usleep(timeout * 1000);
-            timeout *= 2;
-        }
+        /* Wait so that the server can process the request and no need ARQ then. */
+#if ICE_PROCESSING_TIMEOUT > 0
+        av_usleep(ICE_PROCESSING_TIMEOUT * 10000);
+#endif
 
         /* Read the STUN binding response. */
         ret = ffurl_read(rtc->udp_uc, buf, sizeof(buf));
         if (ret < 0) {
+            /* If max retries is 6 and start timeout is 21ms, the total timeout
+             * is about 21 + 42 + 84 + 168 + 336 + 672 = 1263ms. */
+            av_usleep(timeout * 1000);
+            timeout *= 2;
+
             if (ret == AVERROR(EAGAIN) && fast_retries) {
                 fast_retries--;
                 continue;
             }
-            av_log(s, AV_LOG_ERROR, "Failed to read STUN binding response, retries=%d\n", ICE_ARQ_MAX);
+            av_log(s, AV_LOG_ERROR, "Failed to read STUN binding response, retries=%d\n", rtc->ice_arq_max);
             goto end;
         }
     } while (ret < 0);
@@ -827,7 +843,7 @@ static int ice_handshake(AVFormatContext *s)
 
     av_log(s, AV_LOG_INFO, "WHIP: ICE STUN ok, url=udp://%s:%d, username=%s:%s, req=%dB, res=%dB, arq=%d\n",
         rtc->ice_host, rtc->ice_port, rtc->ice_ufrag_remote, rtc->ice_ufrag_local, size, ret,
-        ICE_ARQ_MAX - fast_retries);
+        rtc->ice_arq_max - fast_retries);
     ret = 0;
 
 end:
@@ -897,11 +913,11 @@ static unsigned int openssl_dtls_timer_cb(SSL *dtls, unsigned int previous_us)
     /* If previous_us is 0, for example, the HelloVerifyRequest, we should respond it ASAP.
      * when got ServerHello, we should reset the timer. */
     if (!previous_us || rtc->dtls_should_reset_timer) {
-        timeout_us =  50 * 1000; /* in us */
+        timeout_us =  rtc->dtls_arq_timeout * 1000; /* in us */
     }
 
-    // never exceed the max timeout.
-    timeout_us = FFMIN(timeout_us, 30 * 1000 * 1000); // in us
+    /* never exceed the max timeout. */
+    timeout_us = FFMIN(timeout_us, 30 * 1000 * 1000); /* in us */
 
     av_log(s, AV_LOG_VERBOSE, "DTLS: ARQ timer cb timeout=%ums, previous=%ums\n",
         timeout_us / 1000, previous_us / 1000);
@@ -957,6 +973,7 @@ static int openssl_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
 static av_cold int openssl_init_dtls(AVFormatContext *s, SSL *dtls, SSL_CTX *dtls_ctx, EVP_PKEY *dtls_pkey, EC_KEY *eckey)
 {
     int ret;
+    RTCContext *rtc = s->priv_data;
 
     /* Should use the curves in ClientHello.supported_groups, for example:
      *      Supported Group: x25519 (0x001d)
@@ -1012,14 +1029,15 @@ static av_cold int openssl_init_dtls(AVFormatContext *s, SSL *dtls, SSL_CTX *dtl
 
     /* Set dtls fragment size */
     SSL_set_options(dtls, SSL_OP_NO_QUERY_MTU);
-    SSL_set_mtu(dtls, MAX_DTLS_FRAGMENT_SIZE);
+    /* Avoid dtls negotiate failed, limit the max size of DTLS fragment. */
+    SSL_set_mtu(dtls, rtc->pkt_size);
 
     /* Set the callback for ARQ timer. */
     DTLS_set_timer_cb(dtls, openssl_dtls_timer_cb);
 
     /* Setup DTLS as active, which is client role. */
     SSL_set_connect_state(dtls);
-    SSL_set_max_send_fragment(dtls, MAX_DTLS_FRAGMENT_SIZE);
+    SSL_set_max_send_fragment(dtls, rtc->pkt_size);
 
 end:
     EC_GROUP_free(ecgroup);
@@ -1050,7 +1068,7 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
     }
 
     /* Fast retransmit the request util got response. */
-    for (i = 0; i < DTLS_ARQ_MAX && !res_size; i++) {
+    for (i = 0; i <= rtc->dtls_arq_max && !res_size; i++) {
         req_size = BIO_get_mem_data(bio_out, (char**)&data);
         openssl_state_trace(s, data, req_size, 0, r0, r1);
         ret = ffurl_write(rtc->udp_uc, data, req_size);
@@ -1063,7 +1081,12 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
             return ret;
         }
 
-        for (j = 0; j < DTLS_ARQ_MAX && !res_size; j++) {
+        /* Wait so that the server can process the request and no need ARQ then. */
+#if DTLS_PROCESSING_TIMEOUT > 0
+        av_usleep(DTLS_PROCESSING_TIMEOUT * 10000);
+#endif
+
+        for (j = 0; j <= DTLS_EAGAIN_RETRIES_MAX && !res_size; j++) {
             ret = ffurl_read(rtc->udp_uc, buf, sizeof(buf));
             /* Got response successfully. */
             if (ret > 0) {
@@ -1085,7 +1108,7 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
              * occurs, it returns -1. */
             r0 = DTLSv1_handle_timeout(dtls);
             if (!r0) {
-                av_usleep(DTLS_ARQ_INTERVAL * 1000);
+                av_usleep(rtc->dtls_arq_timeout * 1000);
                 continue; /* no timeout had expired. */
             }
             if (r0 != 1) {
@@ -1310,7 +1333,7 @@ static int write_packet(void *opaque, uint8_t *buf, int buf_size)
  */
 static int create_rtp_muxer(AVFormatContext *s)
 {
-    int ret, i, is_video;
+    int ret, i, is_video, buffer_size, max_packet_size;
     AVFormatContext *rtp_ctx = NULL;
     AVDictionary *opts = NULL;
     uint8_t *buffer = NULL;
@@ -1323,6 +1346,11 @@ static int create_rtp_muxer(AVFormatContext *s)
         ret = AVERROR(ENOSYS);
         goto end;
     }
+
+    /* The UDP buffer size, may greater than MTU. */
+    buffer_size = MAX_UDP_BUFFER_SIZE;
+    /* The RTP payload max size. Reserved some bytes for SRTP checksum and padding. */
+    max_packet_size = rtc->pkt_size - DTLS_SRTP_CHECKSUM_LEN;
 
     for (i = 0; i < s->nb_streams; i++) {
         rtp_ctx = avformat_alloc_context();
@@ -1351,13 +1379,13 @@ static int create_rtp_muxer(AVFormatContext *s)
         avcodec_parameters_copy(rtp_ctx->streams[0]->codecpar, s->streams[i]->codecpar);
         rtp_ctx->streams[0]->time_base = s->streams[i]->time_base;
 
-        buffer = av_malloc(MAX_UDP_BUFFER_SIZE);
-        rtp_ctx->pb = avio_alloc_context(buffer, MAX_UDP_BUFFER_SIZE, 1, s, NULL, write_packet, NULL);
+        buffer = av_malloc(buffer_size);
+        rtp_ctx->pb = avio_alloc_context(buffer, buffer_size, 1, s, NULL, write_packet, NULL);
         if (!rtp_ctx->pb) {
             ret = AVERROR(ENOMEM);
             goto end;
         }
-        rtp_ctx->pb->max_packet_size = MAX_UDP_PAYLOAD_SIZE;
+        rtp_ctx->pb->max_packet_size = max_packet_size;
         rtp_ctx->pb->av_class = &ff_avio_class;
 
         is_video = s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
@@ -1379,6 +1407,9 @@ static int create_rtp_muxer(AVFormatContext *s)
         rtp_ctx = NULL;
     }
 
+    av_log(s, AV_LOG_INFO, "WHIP: Create RTP muxer OK, buffer_size=%d, max_packet_size=%d\n",
+        buffer_size, max_packet_size);
+
 end:
     if (rtp_ctx)
         avio_context_free(&rtp_ctx->pb);
@@ -1389,7 +1420,16 @@ end:
 
 static av_cold int rtc_init(AVFormatContext *s)
 {
-    int ret;
+    int ret, ideal_pkt_size = 532;
+    RTCContext *rtc = s->priv_data;
+
+    av_log(s, AV_LOG_INFO, "WHIP: Init ice_arq_max=%d, ice_arq_timeout=%d, dtls_arq_max=%d, dtls_arq_timeout=%d pkt_size=%d\n",
+        rtc->ice_arq_max, rtc->ice_arq_timeout, rtc->dtls_arq_max, rtc->dtls_arq_timeout, rtc->pkt_size);
+
+    if (rtc->pkt_size < ideal_pkt_size) {
+        av_log(s, AV_LOG_WARNING, "WHIP: pkt_size=%d(<%d) is too small, may cause packet loss\n",
+            rtc->pkt_size, ideal_pkt_size);
+    }
 
     if ((ret = parse_codec(s)) < 0)
         return ret;
@@ -1491,6 +1531,15 @@ static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
     }
 
     ret = ff_write_chained(rtp_ctx, 0, pkt, s, 0);
+    if (ret < 0) {
+        if (ret == AVERROR(EINVAL)) {
+            av_log(s, AV_LOG_WARNING, "Ignore failed to write packet=%dB, ret=%d\n", pkt->size, ret);
+            ret = 0;
+        } else {
+            av_log(s, AV_LOG_ERROR, "Failed to write packet, size=%d\n", pkt->size);
+        }
+        goto end;
+    }
 
 end:
     av_packet_free(&extra);
@@ -1579,14 +1628,21 @@ static av_cold void rtc_deinit(AVFormatContext *s)
     ff_srtp_free(&rtc->srtp_recv);
 }
 
+#define OFFSET(x) offsetof(RTCContext, x)
+#define DEC AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
+    { "ice_arq_max",        "Maximum retransmissions for ICE ARQ",      OFFSET(ice_arq_max),        AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
+    { "ice_arq_timeout",    "Start timeout in ms for ICE ARQ",          OFFSET(ice_arq_timeout),    AV_OPT_TYPE_INT,    { .i64 = 30 },      -1, INT_MAX, DEC },
+    { "dtls_arq_max",       "Maximum retransmissions for DTLS ARQ",     OFFSET(dtls_arq_max),       AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
+    { "dtls_arq_timeout",   "Start timeout in ms for DTLS ARQ",         OFFSET(dtls_arq_timeout),   AV_OPT_TYPE_INT,    { .i64 = 50 },      -1, INT_MAX, DEC },
+    { "pkt_size",           "Maximum RTP packet size",                  OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1500 },    -1, INT_MAX, DEC },
     { NULL },
 };
 
 static const AVClass rtc_muxer_class = {
     .class_name = "RTC WHIP muxer",
     .item_name  = av_default_item_name,
-    .option     = NULL,
+    .option     = options,
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
