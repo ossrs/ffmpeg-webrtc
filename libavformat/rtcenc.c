@@ -52,35 +52,85 @@
 #include "avc.h"
 #include "http.h"
 
-/* The maximum size of an SDP, either offer or answer. */
+/**
+ * Maximum size limit of a Session Description Protocol (SDP),
+ * be it an offer or answer.
+ */
 #define MAX_SDP_SIZE 8192
-/* The maximum size of the buffer for sending or receiving a UDP packet. */
+/**
+ * Maximum size of the buffer for sending and receiving UDP packets.
+ * Please note that this size does not limit the size of the UDP packet that can be sent.
+ * To set the limit for packet size, modify the `pkt_size` parameter.
+ * For instance, it is possible to set the UDP buffer to 4096 to send or receive packets,
+ * but please keep in mind that the `pkt_size` option limits the packet size to 1400.
+ */
 #define MAX_UDP_BUFFER_SIZE 4096
-/* Supported DTLS cipher suites. */
+/*
+ * Supported DTLS cipher suites for FFmpeg as a DTLS client.
+ * These cipher suites are used to negotiate with DTLS servers.
+ *
+ * It is advisable to use a limited number of cipher suites to reduce
+ * the size of DTLS UDP packets.
+ */
 #define DTLS_CIPHER_SUTES "ECDHE-ECDSA-AES128-GCM-SHA256"\
     ":ECDHE-RSA-AES128-GCM-SHA256"\
     ":ECDHE-ECDSA-AES128-SHA"\
     ":ECDHE-RSA-AES128-SHA"\
     ":ECDHE-ECDSA-AES256-SHA"\
     ":ECDHE-RSA-AES256-SHA"
-/* The SRTP key size, defined by SRTP_MASTER_KEY_LEN */
+/**
+ * The size of the Secure Real-time Transport Protocol (SRTP) master key material
+ * that is exported by Secure Sockets Layer (SSL) after a successful Datagram
+ * Transport Layer Security (DTLS) handshake. This material consists of a key
+ * of 16 bytes and a salt of 14 bytes.
+ *
+ * The material is exported by SSL in the following format: client_key (16 bytes) |
+ * server_key (16 bytes) | client_salt (14 bytes) | server_salt (14 bytes).
+ */
 #define DTLS_SRTP_MASTER_KEY_LEN 30
-/* The maximum size of SRTP hmac checksum and padding. */
+/**
+ * The maximum size of the Secure Real-time Transport Protocol (SRTP) HMAC checksum
+ * and padding that is appended to the end of the packet. To calculate the maximum
+ * size of the User Datagram Protocol (UDP) packet that can be sent out, subtract
+ * this size from the `pkt_size`.
+ */
 #define DTLS_SRTP_CHECKSUM_LEN 16
-/* The NALU type for STAP-A */
+/**
+ * STAP-A stands for Single-Time Aggregation Packet.
+ * The NALU type for STAP-A is 24 (0x18).
+ */
 #define NALU_TYPE_STAP_A 24
 
-/* Wait for a small timeout in ms to let server processing the ICE request. */
+/**
+ * Wait for a small timeout in milliseconds to allow for the server to process
+ * the Interactive Connectivity Establishment (ICE) request. If we immediately
+ * read the response after sending the request, we may receive nothing and need
+ * to immediately retry. To lessen the likelihood of retries, we can send the
+ * request and wait for a small amount of time for the server to process it
+ * before reading the response.
+ */
 #define ICE_PROCESSING_TIMEOUT 10
-/* Wait for a small timeout in ms to let server processing the DTLS request. */
+/**
+ * Wait for a short timeout in milliseconds to allow the server to process
+ * the Datagram Transport Layer Security (DTLS) request. If we immediately
+ * read the response after sending the request, we may receive nothing and
+ * need to immediately retry. To reduce the likelihood of retries, we can
+ * send the request and wait a short amount of time for the server to
+ * process it before attempting to read the response.
+ */
 #define DTLS_PROCESSING_TIMEOUT 30
-/* The maximum number of retries for DTLS EGAIN. */
+/**
+ * The maximum number of retries for Datagram Transport Layer Security (DTLS) EAGAIN errors.
+ * When we send a DTLS request and receive no response, we may encounter an EAGAIN error.
+ * In this situation, we wait briefly and attempt to read the response again.
+ * We limit the maximum number of times we retry this loop.
+ */
 #define DTLS_EAGAIN_RETRIES_MAX 5
 
 typedef struct RTCContext {
     AVClass *av_class;
 
-    /* Input audio and video codec parameters */
+    /* Parameters for the input audio and video codecs. */
     AVCodecParameters *audio_par;
     AVCodecParameters *video_par;
 
@@ -1683,11 +1733,11 @@ static av_cold void rtc_deinit(AVFormatContext *s)
 #define OFFSET(x) offsetof(RTCContext, x)
 #define DEC AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
-    { "ice_arq_max",        "Maximum retransmissions for ICE ARQ",      OFFSET(ice_arq_max),        AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
-    { "ice_arq_timeout",    "Start timeout in ms for ICE ARQ",          OFFSET(ice_arq_timeout),    AV_OPT_TYPE_INT,    { .i64 = 30 },      -1, INT_MAX, DEC },
-    { "dtls_arq_max",       "Maximum retransmissions for DTLS ARQ",     OFFSET(dtls_arq_max),       AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
-    { "dtls_arq_timeout",   "Start timeout in ms for DTLS ARQ",         OFFSET(dtls_arq_timeout),   AV_OPT_TYPE_INT,    { .i64 = 50 },      -1, INT_MAX, DEC },
-    { "pkt_size",           "Maximum RTP packet size",                  OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1500 },    -1, INT_MAX, DEC },
+    { "ice_arq_max",        "Maximum number of retransmissions for the ICE ARQ mechanism",      OFFSET(ice_arq_max),        AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
+    { "ice_arq_timeout",    "Start timeout in milliseconds for the ICE ARQ mechanism",          OFFSET(ice_arq_timeout),    AV_OPT_TYPE_INT,    { .i64 = 30 },      -1, INT_MAX, DEC },
+    { "dtls_arq_max",       "Maximum number of retransmissions for the DTLS ARQ mechanism",     OFFSET(dtls_arq_max),       AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
+    { "dtls_arq_timeout",   "Start timeout in milliseconds for the DTLS ARQ mechanism",         OFFSET(dtls_arq_timeout),   AV_OPT_TYPE_INT,    { .i64 = 50 },      -1, INT_MAX, DEC },
+    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out",         OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1500 },    -1, INT_MAX, DEC },
     { NULL },
 };
 
