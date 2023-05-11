@@ -555,6 +555,12 @@ static int exchange_sdp(AVFormatContext *s)
         goto end;
     }
 
+    if (!rtc->sdp_offer || !strlen(rtc->sdp_offer)) {
+        av_log(s, AV_LOG_ERROR, "No offer to exchange\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
     snprintf(buf, sizeof(buf),
              "Cache-Control: no-cache\r\n"
              "Content-Type: application/sdp\r\n");
@@ -624,6 +630,12 @@ static int parse_answer(AVFormatContext *s)
     int i;
     RTCContext *rtc = s->priv_data;
 
+    if (!rtc->sdp_answer || !strlen(rtc->sdp_answer)) {
+        av_log(s, AV_LOG_ERROR, "No answer to parse\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
     pb = avio_alloc_context(rtc->sdp_answer, strlen(rtc->sdp_answer), 0, NULL, NULL, NULL, NULL);
     if (!pb)
         return AVERROR(ENOMEM);
@@ -671,6 +683,18 @@ static int parse_answer(AVFormatContext *s)
                 }
             }
         }
+    }
+
+    if (!rtc->ice_pwd_remote || !strlen(rtc->ice_pwd_remote) || !rtc->ice_ufrag_remote || !rtc->ice_ufrag_remote) {
+        av_log(s, AV_LOG_ERROR, "No ice pwd or ufrag parsed from %s\n", rtc->sdp_answer);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (!rtc->ice_protocol || !rtc->ice_host || !rtc->ice_port) {
+        av_log(s, AV_LOG_ERROR, "No ice candidate parsed from %s\n", rtc->sdp_answer);
+        ret = AVERROR(EINVAL);
+        goto end;
     }
 
     av_log(s, AV_LOG_INFO, "WHIP: SDP offer=%luB, answer=%luB, ufrag=%s, pwd=%luB, transport=%s://%s:%d\n",
