@@ -810,7 +810,7 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     size = avio_tell(pb);
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
-    av_hmac_init(hmac, rtc->ice_pwd_local, strlen(rtc->ice_pwd_local));
+    av_hmac_init(hmac, rtc->ice_pwd_remote, strlen(rtc->ice_pwd_remote));
     av_hmac_update(hmac, buf, size - 24);
     av_hmac_final(hmac, buf + size - 20, 20);
 
