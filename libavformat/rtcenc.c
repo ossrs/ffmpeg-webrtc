@@ -191,6 +191,7 @@ typedef struct RTCContext {
     /* The SRTP send context, to encrypt outgoing packets. */
     struct SRTPContext srtp_audio_send;
     struct SRTPContext srtp_video_send;
+    struct SRTPContext srtp_rtcp_send;
     /* The SRTP receive context, to decrypt incoming packets. */
     struct SRTPContext srtp_recv;
 
@@ -1378,6 +1379,12 @@ static int setup_srtp(AVFormatContext *s)
         goto end;
     }
 
+    ret = ff_srtp_set_crypto(&rtc->srtp_rtcp_send, suite, buf);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to set crypto for rtcp send\n");
+        goto end;
+    }
+
     /* Setup SRTP context for incoming packets */
     if (!av_base64_encode(buf, sizeof(buf), recv_key, sizeof(recv_key))) {
         av_log(s, AV_LOG_ERROR, "Failed to encode recv key\n");
@@ -1475,7 +1482,6 @@ static int create_rtp_muxer(AVFormatContext *s)
         av_dict_set(&opts, "payload_type", buf, 0);
         snprintf(buf, sizeof(buf), "%d", is_video? rtc->video_ssrc : rtc->audio_ssrc);
         av_dict_set(&opts, "ssrc", buf, 0);
-        av_dict_set(&opts, "rtpflags", "4", 0); /* FF_RTP_FLAG_SKIP_RTCP */
 
         ret = avformat_write_header(rtp_ctx, &opts);
         if (ret < 0) {
@@ -1520,14 +1526,10 @@ static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
     if (buf_size < 12 || (buf[0] & 0xC0) != 0x80)
         return 0;
 
-    /* RTCP is not supported yet. */
+    /* Only support audio, video and rtcp. */
     is_rtcp = buf[1] >= 192 && buf[1] <= 223;
-    if (is_rtcp)
-        return 0;
-
-    /* Only support audio and video. */
     payload_type = buf[1] & 0x7f;
-    if (payload_type != rtc->video_payload_type && payload_type != rtc->audio_payload_type) {
+    if (!is_rtcp && payload_type != rtc->video_payload_type && payload_type != rtc->audio_payload_type) {
         return 0;
     }
 
@@ -1552,7 +1554,8 @@ static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
     }
 
     /* Encrypt by SRTP and send out. */
-    srtp = payload_type == rtc->video_payload_type ? &rtc->srtp_video_send : &rtc->srtp_audio_send;
+    srtp = is_rtcp ? &rtc->srtp_rtcp_send
+                   : payload_type == rtc->video_payload_type ? &rtc->srtp_video_send : &rtc->srtp_audio_send;
     cipher_size = ff_srtp_encrypt(srtp, buf, buf_size, cipher, sizeof(cipher));
     if (cipher_size <= 0 || cipher_size < buf_size) {
         av_log(s, AV_LOG_WARNING, "Failed to encrypt packet=%dB, cipher=%dB\n", buf_size, cipher_size);
@@ -1805,6 +1808,7 @@ static av_cold void rtc_deinit(AVFormatContext *s)
     ffurl_closep(&rtc->udp_uc);
     ff_srtp_free(&rtc->srtp_audio_send);
     ff_srtp_free(&rtc->srtp_video_send);
+    ff_srtp_free(&rtc->srtp_rtcp_send);
     ff_srtp_free(&rtc->srtp_recv);
 }
 
