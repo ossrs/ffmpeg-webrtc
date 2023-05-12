@@ -1515,7 +1515,7 @@ end:
  */
 static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
 {
-    int ret, cipher_size, is_rtcp;
+    int ret, cipher_size, is_rtcp, is_video;
     uint8_t payload_type, nalu_header;
     char cipher[MAX_UDP_BUFFER_SIZE];
     AVFormatContext *s = opaque;
@@ -1529,6 +1529,7 @@ static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
     /* Only support audio, video and rtcp. */
     is_rtcp = buf[1] >= 192 && buf[1] <= 223;
     payload_type = buf[1] & 0x7f;
+    is_video = payload_type == rtc->video_payload_type;
     if (!is_rtcp && payload_type != rtc->video_payload_type && payload_type != rtc->audio_payload_type) {
         return 0;
     }
@@ -1538,7 +1539,7 @@ static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
      * 1. The marker bit should be 0, never be 1.
      * 2. The NRI should equal to the first NALU's.
      */
-    if (payload_type == rtc->video_payload_type && buf_size > 12) {
+    if (is_video && buf_size > 12) {
         nalu_header = buf[12] & 0x1f;
         if (nalu_header == NALU_TYPE_STAP_A) {
             /* Reset the marker bit to 0. */
@@ -1553,9 +1554,10 @@ static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
         }
     }
 
+    /* Get the corresponding SRTP context. */
+    srtp = is_rtcp ? &rtc->srtp_rtcp_send : (is_video? &rtc->srtp_video_send : &rtc->srtp_audio_send);
+
     /* Encrypt by SRTP and send out. */
-    srtp = is_rtcp ? &rtc->srtp_rtcp_send
-                   : payload_type == rtc->video_payload_type ? &rtc->srtp_video_send : &rtc->srtp_audio_send;
     cipher_size = ff_srtp_encrypt(srtp, buf, buf_size, cipher, sizeof(cipher));
     if (cipher_size <= 0 || cipher_size < buf_size) {
         av_log(s, AV_LOG_WARNING, "Failed to encrypt packet=%dB, cipher=%dB\n", buf_size, cipher_size);
