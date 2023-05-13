@@ -21,6 +21,10 @@
 
 #include "config.h"
 
+#ifndef CONFIG_OPENSSL
+#error "DTLS is not supported, please enable openssl
+#endif
+
 #if CONFIG_OPENSSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -128,6 +132,17 @@
  */
 #define DTLS_EAGAIN_RETRIES_MAX 5
 
+/* The magic cookie for Session Traversal Utilities for NAT (STUN) messages. */
+#define STUN_MAGIC_COOKIE 0x2112A442
+
+/* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
+enum StunAddr {
+    STUN_ATTR_USERNAME                  = 0x0006, /// shared secret response/bind request
+    STUN_ATTR_USE_CANDIDATE             = 0x0025, /// bind request
+    STUN_ATTR_MESSAGE_INTEGRITY         = 0x0008, /// bind request/response
+    STUN_ATTR_FINGERPRINT               = 0x8028, /// rfc5389
+};
+
 typedef struct RTCContext {
     AVClass *av_class;
 
@@ -169,10 +184,14 @@ typedef struct RTCContext {
     char *ice_protocol;
     char *ice_host;
     int ice_port;
+
     /* The SDP answer received from the WebRTC server. */
     char *sdp_answer;
     /* The resource URL returned in the Location header of WHIP HTTP response. */
     char *whip_resource_url;
+
+    /* The fingerprint of certificate, used in SDP offer. */
+    char *dtls_fingerprint;
 
     /* Whether the timer should be reset. */
     int dtls_should_reset_timer;
@@ -216,9 +235,9 @@ typedef struct RTCContext {
 static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size);
 
 /**
- * Initialize the WHIP muxer context, setup WHIP url, check packet size.
+ * Check the options for the WebRTC muxer.
  */
-static int whip_init(AVFormatContext *s)
+static int whip_check_options(AVFormatContext *s)
 {
     int ideal_pkt_size = 532;
     RTCContext *rtc = s->priv_data;
@@ -523,7 +542,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             "c=IN IP4 0.0.0.0\r\n"
             "a=ice-ufrag:%s\r\n"
             "a=ice-pwd:%s\r\n"
-            "a=fingerprint:sha-256 EE:FE:A2:E5:6A:21:78:60:71:2C:21:DC:1A:2C:98:12:0C:E8:AD:68:07:61:1B:0E:FC:46:97:1E:BC:97:4A:54\r\n"
+            "a=fingerprint:sha-256 %s\r\n"
             "a=setup:active\r\n"
             "a=mid:0\r\n"
             "a=sendonly\r\n"
@@ -535,6 +554,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             rtc->audio_payload_type,
             rtc->ice_ufrag_local,
             rtc->ice_pwd_local,
+            rtc->dtls_fingerprint,
             rtc->audio_payload_type,
             rtc->audio_par->sample_rate,
             rtc->audio_par->ch_layout.nb_channels,
@@ -548,7 +568,7 @@ static int generate_sdp_offer(AVFormatContext *s)
     }
 
     if (rtc->video_par) {
-        profile = rtc->video_par->profile < 0 ? 0xe0 : rtc->video_par->profile;
+        profile = rtc->video_par->profile < 0 ? 0x42 : rtc->video_par->profile;
         level = rtc->video_par->level < 0 ? 30 : rtc->video_par->level;
         profile_iop = profile & FF_PROFILE_H264_CONSTRAINED;
         av_bprintf(&bp, ""
@@ -556,7 +576,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             "c=IN IP4 0.0.0.0\r\n"
             "a=ice-ufrag:%s\r\n"
             "a=ice-pwd:%s\r\n"
-            "a=fingerprint:sha-256 EE:FE:A2:E5:6A:21:78:60:71:2C:21:DC:1A:2C:98:12:0C:E8:AD:68:07:61:1B:0E:FC:46:97:1E:BC:97:4A:54\r\n"
+            "a=fingerprint:sha-256 %s\r\n"
             "a=setup:active\r\n"
             "a=mid:1\r\n"
             "a=sendonly\r\n"
@@ -570,6 +590,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             rtc->video_payload_type,
             rtc->ice_ufrag_local,
             rtc->ice_pwd_local,
+            rtc->dtls_fingerprint,
             rtc->video_payload_type,
             rtc->video_payload_type,
             profile & (~FF_PROFILE_H264_CONSTRAINED),
@@ -846,7 +867,7 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     /* Write 20 bytes header */
     avio_wb16(pb, 0x0001); /* STUN binding request */
     avio_wb16(pb, 0);      /* length */
-    avio_wb32(pb, 0x2112A442); /* magic cookie */
+    avio_wb32(pb, STUN_MAGIC_COOKIE); /* magic cookie */
     avio_wb32(pb, av_get_random_seed()); /* transaction ID */
     avio_wb32(pb, av_get_random_seed()); /* transaction ID */
     avio_wb32(pb, av_get_random_seed()); /* transaction ID */
@@ -861,13 +882,17 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     }
 
     /* Write the username attribute */
-    avio_wb16(pb, 0x0006); /* attribute type username */
+    avio_wb16(pb, STUN_ATTR_USERNAME); /* attribute type username */
     avio_wb16(pb, ret); /* size of username */
     avio_write(pb, username, ret); /* bytes of username */
     ffio_fill(pb, 0, (4 - (ret % 4)) % 4); /* padding */
 
+    /* Write the use-candidate attribute */
+    avio_wb16(pb, STUN_ATTR_USE_CANDIDATE); /* attribute type use-candidate */
+    avio_wb16(pb, 0); /* size of use-candidate */
+
     /* Build and update message integrity */
-    avio_wb16(pb, 0x0008); /* attribute type message integrity */
+    avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
     avio_wb16(pb, 20); /* size of message integrity */
     ffio_fill(pb, 0, 20); /* fill with zero to directly write and skip it */
     size = avio_tell(pb);
@@ -878,7 +903,7 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     av_hmac_final(hmac, buf + size - 20, 20);
 
     /* Write the fingerprint attribute */
-    avio_wb16(pb, 0x8028); /* attribute type fingerprint */
+    avio_wb16(pb, STUN_ATTR_FINGERPRINT); /* attribute type fingerprint */
     avio_wb16(pb, 4); /* size of fingerprint */
     ffio_fill(pb, 0, 4); /* fill with zero to directly write and skip it */
     size = avio_tell(pb);
@@ -898,8 +923,132 @@ end:
 }
 
 /**
+ * Create an ICE binding response.
+ *
+ * This function generates an ICE binding response and writes it to the provided
+ * buffer. The response is signed using the local password for message integrity.
+ *
+ * @param s Pointer to the AVFormatContext structure.
+ * @param tid Pointer to the transaction ID of the binding request. The tid_size should be 12.
+ * @param tid_size The size of the transaction ID, should be 12.
+ * @param buf Pointer to the buffer where the response will be written.
+ * @param buf_size The size of the buffer provided for the response.
+ * @param response_size Pointer to an integer that will store the size of the generated response.
+ * @return Returns 0 if successful or AVERROR_xxx if an error occurs.
+ */
+static int ice_create_response(AVFormatContext *s, char *tid, int tid_size, uint8_t *buf, int buf_size, int *response_size) {
+    int ret = 0, size, crc32;
+    AVIOContext *pb = NULL;
+    AVHMAC *hmac = NULL;
+    RTCContext *rtc = s->priv_data;
+
+    if (tid_size != 12) {
+        av_log(s, AV_LOG_ERROR, "Invalid transaction ID size. Expected 12, got %d\n", tid_size);
+        return AVERROR(EINVAL);
+    }
+
+    pb = avio_alloc_context(buf, buf_size, 1, NULL, NULL, NULL, NULL);
+    if (!pb)
+        return AVERROR(ENOMEM);
+
+    hmac = av_hmac_alloc(AV_HMAC_SHA1);
+    if (!hmac) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    /* Write 20 bytes header */
+    avio_wb16(pb, 0x0101); /* STUN binding response */
+    avio_wb16(pb, 0);      /* length */
+    avio_wb32(pb, STUN_MAGIC_COOKIE); /* magic cookie */
+    avio_write(pb, tid, tid_size); /* transaction ID */
+
+    /* Build and update message integrity */
+    avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
+    avio_wb16(pb, 20); /* size of message integrity */
+    ffio_fill(pb, 0, 20); /* fill with zero to directly write and skip it */
+    size = avio_tell(pb);
+    buf[2] = (size - 20) >> 8;
+    buf[3] = (size - 20) & 0xFF;
+    av_hmac_init(hmac, rtc->ice_pwd_local, strlen(rtc->ice_pwd_local));
+    av_hmac_update(hmac, buf, size - 24);
+    av_hmac_final(hmac, buf + size - 20, 20);
+
+    /* Write the fingerprint attribute */
+    avio_wb16(pb, STUN_ATTR_FINGERPRINT); /* attribute type fingerprint */
+    avio_wb16(pb, 4); /* size of fingerprint */
+    ffio_fill(pb, 0, 4); /* fill with zero to directly write and skip it */
+    size = avio_tell(pb);
+    buf[2] = (size - 20) >> 8;
+    buf[3] = (size - 20) & 0xFF;
+    /* Refer to the av_hash_alloc("CRC32"), av_hash_init and av_hash_final */
+    crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF, buf, size - 8) ^ 0xFFFFFFFF;
+    avio_skip(pb, -4);
+    avio_wb32(pb, crc32 ^ 0x5354554E); /* xor with "STUN" */
+
+    *response_size = size;
+
+end:
+    avio_context_free(&pb);
+    av_hmac_free(hmac);
+    return ret;
+}
+
+static int ice_is_binding_request(char *buf, int buf_size) {
+    return buf_size > 1 && buf[0] == 0x00 && buf[1] == 0x01;
+}
+
+static int ice_is_binding_response(char *buf, int buf_size) {
+    return buf_size > 1 && buf[0] == 0x01 && buf[1] == 0x01;
+}
+
+/**
+ * This function handles incoming binding request messages by responding to them.
+ * If the message is not a binding request, it will be ignored.
+ */
+static int ice_handle_binding_request(AVFormatContext *s, char *buf, int buf_size) {
+    int ret = 0, size;
+    char tid[12];
+    uint8_t res_buf[MAX_UDP_BUFFER_SIZE];
+    RTCContext *rtc = s->priv_data;
+
+    /* Ignore if not a binding request. */
+    if (!ice_is_binding_request(buf, buf_size))
+        return ret;
+
+    if (buf_size < 20) {
+        av_log(s, AV_LOG_ERROR, "Invalid STUN message size. Expected at least 20, got %d\n", buf_size);
+        return AVERROR(EINVAL);
+    }
+
+    /* Parse transaction id from binding request in buf. */
+    memcpy(tid, buf + 8, 12);
+
+    /* Build the STUN binding response. */
+    ret = ice_create_response(s, tid, sizeof(tid), res_buf, sizeof(res_buf), &size);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to create STUN binding response, size=%d\n", size);
+        return ret;
+    }
+
+    ret = ffurl_write(rtc->udp_uc, res_buf, size);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to send STUN binding response, size=%d\n", size);
+        return ret;
+    }
+
+    return 0;
+}
+
+/**
  * Opens the UDP transport and completes the ICE handshake, using fast retransmit to
  * handle packet loss for the binding request.
+ *
+ * To initiate a fast retransmission of the STUN binding request during ICE, we wait only
+ * for a successful local ICE process i.e., when a binding response is received from the
+ * server. Since the server's binding request may not arrive, we do not always wait for it.
+ * However, we will always respond to the server's binding request during ICE, DTLS or
+ * RTP streaming.
  *
  * @param s Pointer to the AVFormatContext
  * @return Returns 0 if the handshake was successful or AVERROR_xxx in case of an error
@@ -907,7 +1056,8 @@ end:
 static int ice_handshake(AVFormatContext *s)
 {
     int ret, size;
-    char url[256], buf[MAX_UDP_BUFFER_SIZE];
+    char url[256], tmp[16];
+    char req_buf[MAX_UDP_BUFFER_SIZE], res_buf[MAX_UDP_BUFFER_SIZE];
     RTCContext *rtc = s->priv_data;
     int fast_retries = rtc->ice_arq_max, timeout = rtc->ice_arq_timeout;
 
@@ -922,8 +1072,8 @@ static int ice_handshake(AVFormatContext *s)
     av_opt_set(rtc->udp_uc->priv_data, "connect", "1", 0);
     av_opt_set(rtc->udp_uc->priv_data, "fifo_size", "0", 0);
     /* Set the max packet size to the buffer size. */
-    snprintf(buf, sizeof(buf), "%d", rtc->pkt_size);
-    av_opt_set(rtc->udp_uc->priv_data, "pkt_size", buf, 0);
+    snprintf(tmp, sizeof(tmp), "%d", rtc->pkt_size);
+    av_opt_set(rtc->udp_uc->priv_data, "pkt_size", tmp, 0);
 
     ret = ffurl_connect(rtc->udp_uc, NULL);
     if (ret < 0) {
@@ -936,15 +1086,15 @@ static int ice_handshake(AVFormatContext *s)
     rtc->udp_uc->flags |= AVIO_FLAG_READ | AVIO_FLAG_NONBLOCK;
 
     /* Build the STUN binding request. */
-    ret = ice_create_request(s, buf, sizeof(buf), &size);
+    ret = ice_create_request(s, req_buf, sizeof(req_buf), &size);
     if (ret < 0) {
         av_log(s, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
         goto end;
     }
 
     /* Fast retransmit the STUN binding request. */
-    do {
-        ret = ffurl_write(rtc->udp_uc, buf, size);
+    while (1) {
+        ret = ffurl_write(rtc->udp_uc, req_buf, size);
         if (ret < 0) {
             av_log(s, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
             goto end;
@@ -956,7 +1106,7 @@ static int ice_handshake(AVFormatContext *s)
 #endif
 
         /* Read the STUN binding response. */
-        ret = ffurl_read(rtc->udp_uc, buf, sizeof(buf));
+        ret = ffurl_read(rtc->udp_uc, res_buf, sizeof(res_buf));
         if (ret < 0) {
             /* If max retries is 6 and start timeout is 21ms, the total timeout
              * is about 21 + 42 + 84 + 168 + 336 + 672 = 1263ms. */
@@ -967,15 +1117,50 @@ static int ice_handshake(AVFormatContext *s)
                 fast_retries--;
                 continue;
             }
+
             av_log(s, AV_LOG_ERROR, "Failed to read STUN binding response, retries=%d\n", rtc->ice_arq_max);
             goto end;
         }
-    } while (ret < 0);
 
-    if (ret < 2 || buf[0] != 0x01 || buf[1] != 0x01) {
-        av_log(s, AV_LOG_ERROR, "Invalid STUN binding response, size=%d, type=%02X%02X\n", ret, buf[0], buf[1]);
-        ret = AVERROR(EIO);
-        goto end;
+        /* If got any binding response, the fast retransmission is done. */
+        if (ice_is_binding_response(res_buf, ret))
+            break;
+
+        /* When a binding request is received, it is necessary to respond immediately. */
+        if (ice_is_binding_request(res_buf, ret)) {
+            if ((ret = ice_handle_binding_request(s, res_buf, ret)) < 0) {
+                goto end;
+            }
+        }
+    }
+
+    /* Wait just for a small while to get the possible binding request from server. */
+    fast_retries = rtc->ice_arq_max / 2;
+    timeout = rtc->ice_arq_timeout;
+    while (fast_retries) {
+        ret = ffurl_read(rtc->udp_uc, res_buf, sizeof(res_buf));
+        if (ret < 0) {
+            /* If max retries is 6 and start timeout is 21ms, the total timeout
+             * is about 21 + 42 + 84 = 147ms. */
+            av_usleep(timeout * 1000);
+            timeout *= 2;
+
+            if (ret == AVERROR(EAGAIN)) {
+                fast_retries--;
+                continue;
+            }
+
+            av_log(s, AV_LOG_ERROR, "Failed to read STUN binding request, retries=%d\n", rtc->ice_arq_max);
+            goto end;
+        }
+
+        /* When a binding request is received, it is necessary to respond immediately. */
+        if (ice_is_binding_request(res_buf, ret)) {
+            if ((ret = ice_handle_binding_request(s, res_buf, ret)) < 0) {
+                goto end;
+            }
+            break;
+        }
     }
 
     av_log(s, AV_LOG_INFO, "WHIP: ICE STUN ok, url=udp://%s:%d, username=%s:%s, req=%dB, res=%dB, arq=%d\n",
@@ -990,6 +1175,142 @@ end:
 #if CONFIG_OPENSSL
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
+/**
+ * Generate a self-signed certificate and private key for DTLS.
+ */
+static int openssl_init_cert(AVFormatContext *s, EVP_PKEY *dtls_pkey, X509 *dtls_cert)
+{
+    int ret = 0, serial, expire_day, i, n = 0;
+    AVBPrint fingerprint;
+    unsigned char md[EVP_MAX_MD_SIZE];
+    const char *aor = "ffmpeg.org";
+    X509_NAME* subject = NULL;
+    EC_GROUP *ecgroup = NULL;
+    EC_KEY* dtls_eckey = NULL;
+    RTCContext *rtc = s->priv_data;
+
+    /* To prevent a crash during cleanup, always initialize it. */
+    av_bprint_init(&fingerprint, 1, MAX_SDP_SIZE);
+
+    dtls_eckey = EC_KEY_new();
+
+    /* Should use the curves in ClientHello.supported_groups, for example:
+     *      Supported Group: x25519 (0x001d)
+     *      Supported Group: secp256r1 (0x0017)
+     *      Supported Group: secp384r1 (0x0018)
+     * note that secp256r1 in openssl is called NID_X9_62_prime256v1, not NID_secp256k1
+     */
+    ecgroup = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+
+    if (EC_KEY_set_group(dtls_eckey, ecgroup) != 1) {
+        av_log(s, AV_LOG_ERROR, "DTLS: EC_KEY_set_group failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    if (EC_KEY_generate_key(dtls_eckey) != 1) {
+        av_log(s, AV_LOG_ERROR, "DTLS: EC_KEY_generate_key failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    if (EVP_PKEY_set1_EC_KEY(dtls_pkey, dtls_eckey) != 1) {
+        av_log(s, AV_LOG_ERROR, "DTLS: EVP_PKEY_set1_EC_KEY failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    /* Generate a self-signed certificate. */
+    subject = X509_NAME_new();
+
+    serial = (int)av_get_random_seed();
+    if (ASN1_INTEGER_set(X509_get_serialNumber(dtls_cert), serial) != 1) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to set serial\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC, aor, strlen(aor), -1, 0) != 1) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to set CN\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (X509_set_issuer_name(dtls_cert, subject) != 1) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to set issuer\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    if (X509_set_subject_name(dtls_cert, subject) != 1) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to set subject name\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    expire_day = 365;
+    if (!X509_gmtime_adj(X509_get_notBefore(dtls_cert), 0)) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to set notBefore\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    if (!X509_gmtime_adj(X509_get_notAfter(dtls_cert), 60*60*24*expire_day)) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to set notAfter\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (X509_set_version(dtls_cert, 2) != 1) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to set version\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (X509_set_pubkey(dtls_cert, dtls_pkey) != 1) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to set public key\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (!X509_sign(dtls_cert, dtls_pkey, EVP_sha1())) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to sign certificate\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    /* Generate the fingerpint of certficate. */
+    if (X509_digest(dtls_cert, EVP_sha256(), md, &n) != 1) {
+        av_log(s, AV_LOG_ERROR, "Failed to generate fingerprint\n");
+        ret = AVERROR(EIO);
+        goto end;
+    }
+    for (i = 0; i < n; i++) {
+        av_bprintf(&fingerprint, "%02X", md[i]);
+        if (i < n - 1)
+            av_bprintf(&fingerprint, ":");
+    }
+    if (!av_bprint_is_complete(&fingerprint)) {
+        av_log(s, AV_LOG_ERROR, "Fingerprint %d exceed max %d, %s\n", ret, MAX_SDP_SIZE, fingerprint.str);
+        ret = AVERROR(EIO);
+        goto end;
+    }
+    if (!fingerprint.str || !strlen(fingerprint.str)) {
+        av_log(s, AV_LOG_ERROR, "Fingerprint is empty\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    rtc->dtls_fingerprint = av_strdup(fingerprint.str);
+    if (!rtc->dtls_fingerprint) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+end:
+    EC_KEY_free(dtls_eckey);
+    EC_GROUP_free(ecgroup);
+    X509_NAME_free(subject);
+    av_bprint_finalize(&fingerprint, NULL);
+    return ret;
+}
 
 /**
  * Callback function to print the OpenSSL SSL status.
@@ -1107,44 +1428,32 @@ static int openssl_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
 
 /**
  * Initializes DTLS context for client role using ECDHE.
- *
- * @return 0 if OK, AVERROR_xxx on error
  */
-static av_cold int openssl_init_dtls(AVFormatContext *s, SSL *dtls, SSL_CTX *dtls_ctx, EVP_PKEY *dtls_pkey, EC_KEY *eckey)
+static av_cold int openssl_init_dtls_context(AVFormatContext *s, EVP_PKEY *dtls_pkey, X509 *dtls_cert, SSL_CTX *dtls_ctx)
 {
-    int ret;
-    RTCContext *rtc = s->priv_data;
-
-    /* Should use the curves in ClientHello.supported_groups, for example:
-     *      Supported Group: x25519 (0x001d)
-     *      Supported Group: secp256r1 (0x0017)
-     *      Supported Group: secp384r1 (0x0018)
-     * note that secp256r1 in openssl is called NID_X9_62_prime256v1, not NID_secp256k1
-     */
-    EC_GROUP *ecgroup = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
-
-    if (EC_KEY_set_group(eckey, ecgroup) != 1) {
-        av_log(s, AV_LOG_ERROR, "DTLS: EC_KEY_set_group failed\n");
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-    if (EC_KEY_generate_key(eckey) != 1) {
-        av_log(s, AV_LOG_ERROR, "DTLS: EC_KEY_generate_key failed\n");
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-    if (EVP_PKEY_set1_EC_KEY(dtls_pkey, eckey) != 1) {
-        av_log(s, AV_LOG_ERROR, "DTLS: EVP_PKEY_set1_EC_KEY failed\n");
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
+    int ret = 0;
 
     /* For ECDSA, we could set the curves list. */
-    SSL_CTX_set1_curves_list(dtls_ctx, "P-521:P-384:P-256");
+    if (SSL_CTX_set1_curves_list(dtls_ctx, "P-521:P-384:P-256") != 1) {
+        av_log(s, AV_LOG_ERROR, "DTLS: SSL_CTX_set1_curves_list failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
 
     /* We use "ALL", while you can use "DEFAULT" means "ALL:!EXPORT:!LOW:!aNULL:!eNULL:!SSLv2" */
     if (SSL_CTX_set_cipher_list(dtls_ctx, DTLS_CIPHER_SUTES) != 1) {
         av_log(s, AV_LOG_ERROR, "DTLS: SSL_CTX_set_cipher_list failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    /* Setup the certificate. */
+    if (SSL_CTX_use_certificate(dtls_ctx, dtls_cert) != 1) {
+        av_log(s, AV_LOG_ERROR, "DTLS: SSL_CTX_use_certificate failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    if (SSL_CTX_use_PrivateKey(dtls_ctx, dtls_pkey) != 1) {
+        av_log(s, AV_LOG_ERROR, "DTLS: SSL_CTX_use_PrivateKey failed\n");
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -1156,12 +1465,23 @@ static av_cold int openssl_init_dtls(AVFormatContext *s, SSL *dtls, SSL_CTX *dtl
     /* Whether we should read as many input bytes as possible (for non-blocking reads) or not. */
     SSL_CTX_set_read_ahead(dtls_ctx, 1);
     /* Only support SRTP_AES128_CM_SHA1_80, please read ssl/d1_srtp.c */
-    ret = SSL_CTX_set_tlsext_use_srtp(dtls_ctx, "SRTP_AES128_CM_SHA1_80");
-    if (ret) {
-        av_log(s, AV_LOG_ERROR, "DTLS: SSL_CTX_set_tlsext_use_srtp failed, ret=%d\n", ret);
+    if (SSL_CTX_set_tlsext_use_srtp(dtls_ctx, "SRTP_AES128_CM_SHA1_80")) {
+        av_log(s, AV_LOG_ERROR, "DTLS: SSL_CTX_set_tlsext_use_srtp failed\n");
         ret = AVERROR(EINVAL);
         goto end;
     }
+
+end:
+    return ret;
+}
+
+/**
+ * After creating a DTLS context, initialize the DTLS SSL object.
+ */
+static av_cold int openssl_init_dtls_ssl(AVFormatContext *s, SSL *dtls)
+{
+    int ret = 0;
+    RTCContext* rtc = s->priv_data;
 
     /* Setup the callback for logging. */
     SSL_set_ex_data(dtls, 0, s);
@@ -1179,8 +1499,6 @@ static av_cold int openssl_init_dtls(AVFormatContext *s, SSL *dtls, SSL_CTX *dtl
     SSL_set_connect_state(dtls);
     SSL_set_max_send_fragment(dtls, rtc->pkt_size);
 
-end:
-    EC_GROUP_free(ecgroup);
     return ret;
 }
 
@@ -1232,7 +1550,19 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
 
         for (j = 0; j <= DTLS_EAGAIN_RETRIES_MAX && !res_size; j++) {
             ret = ffurl_read(rtc->udp_uc, buf, sizeof(buf));
-            /* Got response successfully. */
+
+            /* When a binding request is received, it is necessary to respond immediately. */
+            if (ice_is_binding_request(buf, ret)) {
+                if ((ret = ice_handle_binding_request(s, buf, ret)) < 0) {
+                    return ret;
+                }
+            }
+
+            /* Ignore other packets, such as ICE indication, except DTLS. */
+            if (ret < 13 || buf[0] <= 19 || buf[0] >= 64)
+                continue;
+
+            /* Got DTLS response successfully. */
             if (ret > 0) {
                 res_size = ret;
                 rtc->dtls_should_reset_timer = 1;
@@ -1278,7 +1608,7 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
         return AVERROR(EIO);
     }
 
-    return 0;
+    return ret;
 }
 
 /**
@@ -1290,29 +1620,31 @@ static int openssl_drive_context(AVFormatContext *s, SSL *dtls, BIO *bio_in, BIO
  *
  * @return 0 if OK, AVERROR_xxx on error
  */
-static int openssl_dtls_handshake(AVFormatContext *s)
+static int openssl_dtls_handshake(AVFormatContext *s, EVP_PKEY *dtls_pkey, X509 *dtls_cert)
 {
     int ret, loop;
     SSL_CTX *dtls_ctx = NULL;
     SSL *dtls = NULL;
-    BIO *bio_in = NULL, *bio_out = NULL;
-    EC_KEY *eckey = NULL;
-    EVP_PKEY *dtls_pkey = NULL;
     const char* dst = "EXTRACTOR-dtls_srtp";
+    BIO *bio_in = NULL, *bio_out = NULL;
     RTCContext *rtc = s->priv_data;
 
-    /* Create and initialize SSL context. */
-    dtls_pkey = EVP_PKEY_new();
-    eckey = EC_KEY_new();
-
     dtls_ctx = SSL_CTX_new(DTLS_client_method());
+
+    ret = openssl_init_dtls_context(s, dtls_pkey, dtls_cert, dtls_ctx);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to initialize DTLS context\n");
+        goto end;
+    }
+
+    /* The dtls should not be created unless the dtls_ctx has been initialized. */
     dtls = SSL_new(dtls_ctx);
 
     bio_in = BIO_new(BIO_s_mem());
     bio_out = BIO_new(BIO_s_mem());
     SSL_set_bio(dtls, bio_in, bio_out);
 
-    ret = openssl_init_dtls(s, dtls, dtls_ctx, dtls_pkey, eckey);
+    ret = openssl_init_dtls_ssl(s, dtls);
     if (ret < 0) {
         av_log(s, AV_LOG_ERROR, "Failed to initialize SSL context\n");
         goto end;
@@ -1346,8 +1678,6 @@ static int openssl_dtls_handshake(AVFormatContext *s)
 end:
     SSL_free(dtls);
     SSL_CTX_free(dtls_ctx);
-    EC_KEY_free(eckey);
-    EVP_PKEY_free(dtls_pkey);
     return ret;
 }
 
@@ -1714,41 +2044,58 @@ static av_cold int rtc_init(AVFormatContext *s)
 {
     int ret;
 
-    if ((ret = whip_init(s)) < 0)
+#if CONFIG_OPENSSL
+    /* The SSL certificate used for fingerprint in SDP and DTLS handshake. */
+    X509 *dtls_cert = X509_new();
+    /* The private key for DTLS handshake. */
+    EVP_PKEY *dtls_pkey = EVP_PKEY_new();
+
+    if ((ret = openssl_init_cert(s, dtls_pkey, dtls_cert)) < 0) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to init openssl cert, ret=%d\n", ret);
         return ret;
+    }
+#endif
+
+    if ((ret = whip_check_options(s)) < 0)
+        goto end;
 
     if ((ret = parse_codec(s)) < 0)
-        return ret;
+        goto end;
 
     if ((ret = generate_sdp_offer(s)) < 0)
-        return ret;
+        goto end;
 
     if ((ret = exchange_sdp(s)) < 0)
-        return ret;
+        goto end;
 
     if ((ret = parse_answer(s)) < 0)
-        return ret;
+        goto end;
 
-    return 0;
+    if ((ret = ice_handshake(s)) < 0)
+        goto end;
+
+#if CONFIG_OPENSSL
+    if ((ret = openssl_dtls_handshake(s, dtls_pkey, dtls_cert)) < 0)
+        goto end;
+#endif
+
+    if ((ret = setup_srtp(s)) < 0)
+        goto end;
+
+end:
+#if CONFIG_OPENSSL
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    X509_free(dtls_cert);
+    EVP_PKEY_free(dtls_pkey);
+#pragma GCC diagnostic pop
+#endif
+    return ret;
 }
 
 static int rtc_write_header(AVFormatContext *s)
 {
     int ret;
-
-    if ((ret = ice_handshake(s)) < 0)
-        return ret;
-
-#if CONFIG_OPENSSL
-    if ((ret = openssl_dtls_handshake(s)) < 0)
-        return ret;
-#else
-    av_log(s, AV_LOG_ERROR, "DTLS is not supported, please enable openssl\n");
-    return AVERROR(ENOSYS);
-#endif
-
-    if ((ret = setup_srtp(s)) < 0)
-        return ret;
 
     if ((ret = create_rtp_muxer(s)) < 0)
         return ret;
@@ -1764,6 +2111,8 @@ static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
     AVFormatContext *rtp_ctx = st->priv_data;
 
     /* TODO: Send binding request every 1s as WebRTC heartbeat. */
+    /* TODO: Receive packets from the server such as ICE binding requests, DTLS messages,
+     * and RTCP like PLI requests, then respond to them.*/
 
     /* For audio OPUS stream, correct the timestamp. */
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -1825,6 +2174,7 @@ static av_cold void rtc_deinit(AVFormatContext *s)
     ff_srtp_free(&rtc->srtp_video_send);
     ff_srtp_free(&rtc->srtp_rtcp_send);
     ff_srtp_free(&rtc->srtp_recv);
+    av_freep(&rtc->dtls_fingerprint);
 }
 
 #define OFFSET(x) offsetof(RTCContext, x)
