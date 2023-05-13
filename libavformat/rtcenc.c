@@ -216,6 +216,25 @@ typedef struct RTCContext {
 static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size);
 
 /**
+ * Initialize the WHIP muxer context, setup WHIP url, check packet size.
+ */
+static int whip_init(AVFormatContext *s)
+{
+    int ideal_pkt_size = 532;
+    RTCContext *rtc = s->priv_data;
+
+    av_log(s, AV_LOG_INFO, "WHIP: Init ice_arq_max=%d, ice_arq_timeout=%d, dtls_arq_max=%d, dtls_arq_timeout=%d pkt_size=%d\n",
+        rtc->ice_arq_max, rtc->ice_arq_timeout, rtc->dtls_arq_max, rtc->dtls_arq_timeout, rtc->pkt_size);
+
+    if (rtc->pkt_size < ideal_pkt_size) {
+        av_log(s, AV_LOG_WARNING, "WHIP: pkt_size=%d(<%d) is too small, may cause packet loss\n",
+            rtc->pkt_size, ideal_pkt_size);
+    }
+
+    return 0;
+}
+
+/**
  * Parses the ISOM AVCC format of extradata and extracts SPS/PPS.
  *
  * This function is used to parse SPS/PPS from the extradata in ISOM AVCC format.
@@ -1693,16 +1712,10 @@ end:
 
 static av_cold int rtc_init(AVFormatContext *s)
 {
-    int ret, ideal_pkt_size = 532;
-    RTCContext *rtc = s->priv_data;
+    int ret;
 
-    av_log(s, AV_LOG_INFO, "WHIP: Init ice_arq_max=%d, ice_arq_timeout=%d, dtls_arq_max=%d, dtls_arq_timeout=%d pkt_size=%d\n",
-        rtc->ice_arq_max, rtc->ice_arq_timeout, rtc->dtls_arq_max, rtc->dtls_arq_timeout, rtc->pkt_size);
-
-    if (rtc->pkt_size < ideal_pkt_size) {
-        av_log(s, AV_LOG_WARNING, "WHIP: pkt_size=%d(<%d) is too small, may cause packet loss\n",
-            rtc->pkt_size, ideal_pkt_size);
-    }
+    if ((ret = whip_init(s)) < 0)
+        return ret;
 
     if ((ret = parse_codec(s)) < 0)
         return ret;
