@@ -22,7 +22,7 @@
 #include "config.h"
 
 #ifndef CONFIG_OPENSSL
-#error "DTLS is not supported, please enable openssl
+#error "DTLS is not supported, please enable openssl"
 #endif
 
 #if CONFIG_OPENSSL
