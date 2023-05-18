@@ -181,9 +181,6 @@ typedef struct DTLSContext {
     int pkt_size;
 } DTLSContext;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-
 /**
  * Generate a self-signed certificate and private key for DTLS.
  */
@@ -707,7 +704,6 @@ end:
     return ret;
 }
 
-#pragma GCC diagnostic pop
 #endif
 
 typedef struct RTCContext {
