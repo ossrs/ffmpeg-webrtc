@@ -1372,8 +1372,14 @@ static int parse_answer(AVFormatContext *s)
         }
     }
 
-    if (!rtc->ice_pwd_remote || !strlen(rtc->ice_pwd_remote) || !rtc->ice_ufrag_remote || !rtc->ice_ufrag_remote) {
-        av_log(s, AV_LOG_ERROR, "No ice pwd or ufrag parsed from %s\n", rtc->sdp_answer);
+    if (!rtc->ice_pwd_remote || !strlen(rtc->ice_pwd_remote)) {
+        av_log(s, AV_LOG_ERROR, "No remote ice pwd parsed from %s\n", rtc->sdp_answer);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (!rtc->ice_ufrag_remote || !strlen(rtc->ice_ufrag_remote)) {
+        av_log(s, AV_LOG_ERROR, "No remote ice ufrag parsed from %s\n", rtc->sdp_answer);
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -2120,13 +2126,6 @@ static av_cold int rtc_init(AVFormatContext *s)
     if ((ret = setup_srtp(s)) < 0)
         return ret;
 
-    return ret;
-}
-
-static int rtc_write_header(AVFormatContext *s)
-{
-    int ret;
-
     if ((ret = create_rtp_muxer(s)) < 0)
         return ret;
 
@@ -2234,7 +2233,6 @@ const FFOutputFormat ff_rtc_muxer = {
     .p.priv_class       = &rtc_muxer_class,
     .priv_data_size     = sizeof(RTCContext),
     .init               = rtc_init,
-    .write_header       = rtc_write_header,
     .write_packet       = rtc_write_packet,
     .deinit             = rtc_deinit,
 };
