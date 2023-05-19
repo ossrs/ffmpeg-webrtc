@@ -962,9 +962,9 @@ static int parse_codec(AVFormatContext *s)
                        desc ? desc->name : "unknown");
                 return AVERROR_PATCHWELCOME;
             }
-            if (par->profile > 0 && (par->profile & ~FF_PROFILE_H264_CONSTRAINED) != FF_PROFILE_H264_BASELINE) {
-                av_log(s, AV_LOG_ERROR, "Profile %d of stream %d is not baseline, currently unsupported by RTC\n",
-                       par->profile, i);
+
+            if (par->video_delay > 0) {
+                av_log(s, AV_LOG_ERROR, "Unsupported B frames by RTC\n");
                 return AVERROR_PATCHWELCOME;
             }
 
