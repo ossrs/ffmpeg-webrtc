@@ -122,6 +122,12 @@
  */
 #define DTLS_EAGAIN_RETRIES_MAX 5
 
+/**
+ * The DTLS timer's base timeout in microseconds. Its purpose is to minimize the unnecessary
+ * retransmission of ClientHello.
+ */
+#define DTLS_SSL_TIMER_BASE 400 * 1000
+
 /* The magic cookie for Session Traversal Utilities for NAT (STUN) messages. */
 #define STUN_MAGIC_COOKIE 0x2112A442
 
@@ -373,7 +379,7 @@ static unsigned int openssl_dtls_timer_cb(SSL *dtls, unsigned int previous_us)
     /* If previous_us is 0, for example, the HelloVerifyRequest, we should respond it ASAP.
      * when got ServerHello, we should reset the timer. */
     if (!previous_us || ctx->dtls_should_reset_timer)
-        timeout_us =  ctx->dtls_arq_timeout * 1000; /* in us */
+        timeout_us =  DTLS_SSL_TIMER_BASE + ctx->dtls_arq_timeout * 1000; /* in us */
 
     /* never exceed the max timeout. */
     timeout_us = FFMIN(timeout_us, 30 * 1000 * 1000); /* in us */
@@ -2176,7 +2182,7 @@ static const AVOption options[] = {
     { "ice_arq_max",        "Maximum number of retransmissions for the ICE ARQ mechanism",      OFFSET(ice_arq_max),        AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
     { "ice_arq_timeout",    "Start timeout in milliseconds for the ICE ARQ mechanism",          OFFSET(ice_arq_timeout),    AV_OPT_TYPE_INT,    { .i64 = 30 },      -1, INT_MAX, DEC },
     { "dtls_arq_max",       "Maximum number of retransmissions for the DTLS ARQ mechanism",     OFFSET(dtls_arq_max),       AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
-    { "dtls_arq_timeout",   "Start timeout in milliseconds for the DTLS ARQ mechanism",         OFFSET(dtls_arq_timeout),   AV_OPT_TYPE_INT,    { .i64 = 50 },      -1, INT_MAX, DEC },
+    { "dtls_arq_timeout",   "Start timeout in milliseconds for the DTLS ARQ mechanism",         OFFSET(dtls_arq_timeout),   AV_OPT_TYPE_INT,    { .i64 = 50 },     -1, INT_MAX, DEC },
     { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out",         OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1500 },    -1, INT_MAX, DEC },
     { NULL },
 };
