@@ -23,9 +23,7 @@
 
 #ifndef CONFIG_OPENSSL
 #error "DTLS is not supported, please enable openssl"
-#endif
-
-#if CONFIG_OPENSSL
+#else
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #if OPENSSL_VERSION_NUMBER < 0x1010102fL
@@ -33,29 +31,21 @@
 #endif
 #endif
 
-#include "libavutil/dict.h"
-#include "libavutil/avassert.h"
-#include "libavutil/mathematics.h"
-#include "libavcodec/codec_desc.h"
-#include "libavcodec/mpeg4audio.h"
-#include "avformat.h"
+#include "libavcodec/avcodec.h"
+#include "libavutil/base64.h"
+#include "libavutil/bprint.h"
+#include "libavutil/crc.h"
+#include "libavutil/hmac.h"
+#include "libavutil/opt.h"
+#include "libavutil/random_seed.h"
+#include "libavutil/time.h"
+#include "avc.h"
+#include "avio_internal.h"
+#include "http.h"
 #include "internal.h"
 #include "mux.h"
-#include "libavutil/opt.h"
-#include "libavcodec/avcodec.h"
-#include "libavutil/avstring.h"
-#include "url.h"
-#include "libavutil/random_seed.h"
-#include "avio_internal.h"
-#include "libavutil/hmac.h"
-#include "libavutil/crc.h"
 #include "network.h"
-#include "libavutil/time.h"
-#include "libavutil/base64.h"
 #include "srtp.h"
-#include "avc.h"
-#include "http.h"
-#include "libavutil/bprint.h"
 
 /**
  * Maximum size limit of a Session Description Protocol (SDP),
@@ -221,6 +211,10 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
 
     /* Generate a self-signed certificate. */
     subject = X509_NAME_new();
+    if (!subject) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
 
     serial = (int)av_get_random_seed();
     if (ASN1_INTEGER_set(X509_get_serialNumber(dtls_cert), serial) != 1) {
@@ -328,18 +322,15 @@ static av_cold void dtls_context_deinit(DTLSContext *ctx)
 static void openssl_on_info(const SSL *dtls, int where, int ret)
 {
     int w, r1;
-    const char *method, *alert_type, *alert_desc;
+    const char *method = "undefined", *alert_type, *alert_desc;
     DTLSContext *ctx = (DTLSContext*)SSL_get_ex_data(dtls, 0);
     void *s1 = ctx->log_avcl;
 
     w = where & ~SSL_ST_MASK;
-    if (w & SSL_ST_CONNECT) {
+    if (w & SSL_ST_CONNECT)
         method = "SSL_connect";
-    } else if (w & SSL_ST_ACCEPT) {
+    else if (w & SSL_ST_ACCEPT)
         method = "SSL_accept";
-    } else {
-        method = "undefined";
-    }
 
     r1 = SSL_get_error(dtls, ret);
     if (where & SSL_CB_LOOP) {
@@ -351,26 +342,23 @@ static void openssl_on_info(const SSL *dtls, int where, int ret)
         alert_type = SSL_alert_type_string_long(ret);
         alert_desc = SSL_alert_desc_string(ret);
 
-        if (!av_strcasecmp(alert_type, "warning") && !av_strcasecmp(alert_desc, "CN")) {
+        if (!av_strcasecmp(alert_type, "warning") && !av_strcasecmp(alert_desc, "CN"))
             av_log(s1, AV_LOG_WARNING, "DTLS: SSL3 alert method=%s type=%s, desc=%s(%s), where=%d, ret=%d, r1=%d\n",
                 method, alert_type, alert_desc, SSL_alert_desc_string_long(ret), where, ret, r1);
-        } else {
+        else
             av_log(s1, AV_LOG_ERROR, "DTLS: SSL3 alert method=%s type=%s, desc=%s(%s), where=%d, ret=%d, r1=%d\n",
                 method, alert_type, alert_desc, SSL_alert_desc_string_long(ret), where, ret, r1);
-        }
     } else if (where & SSL_CB_EXIT) {
-        if (!ret) {
+        if (!ret)
             av_log(s1, AV_LOG_WARNING, "DTLS: Fail method=%s state=%s(%s), where=%d, ret=%d, r1=%d\n",
                 method, SSL_state_string(dtls), SSL_state_string_long(dtls), where, ret, r1);
-        } else if (ret < 0) {
-            if (r1 != SSL_ERROR_NONE && r1 != SSL_ERROR_WANT_READ && r1 != SSL_ERROR_WANT_WRITE) {
+        else if (ret < 0)
+            if (r1 != SSL_ERROR_NONE && r1 != SSL_ERROR_WANT_READ && r1 != SSL_ERROR_WANT_WRITE)
                 av_log(s1, AV_LOG_ERROR, "DTLS: Error method=%s state=%s(%s), where=%d, ret=%d, r1=%d\n",
                     method, SSL_state_string(dtls), SSL_state_string_long(dtls), where, ret, r1);
-            } else {
+            else
                 av_log(s1, AV_LOG_VERBOSE, "DTLS: method=%s state=%s(%s), where=%d, ret=%d, r1=%d\n",
                     method, SSL_state_string(dtls), SSL_state_string_long(dtls), where, ret, r1);
-            }
-        }
     }
 }
 
@@ -384,9 +372,8 @@ static unsigned int openssl_dtls_timer_cb(SSL *dtls, unsigned int previous_us)
 
     /* If previous_us is 0, for example, the HelloVerifyRequest, we should respond it ASAP.
      * when got ServerHello, we should reset the timer. */
-    if (!previous_us || ctx->dtls_should_reset_timer) {
+    if (!previous_us || ctx->dtls_should_reset_timer)
         timeout_us =  ctx->dtls_arq_timeout * 1000; /* in us */
-    }
 
     /* never exceed the max timeout. */
     timeout_us = FFMIN(timeout_us, 30 * 1000 * 1000); /* in us */
@@ -405,36 +392,16 @@ static void openssl_state_trace(DTLSContext *ctx, uint8_t *data, int length, int
     void *s1 = ctx->log_avcl;
 
     /* Change_cipher_spec(20), alert(21), handshake(22), application_data(23) */
-    if (length >= 1) {
+    if (length >= 1)
         content_type = (uint8_t)data[0];
-    }
-
-    if (length >= 13) {
+    if (length >= 13)
         size = (uint16_t)(data[11])<<8 | (uint16_t)data[12];
-    }
-
-    if (length >= 14) {
+    if (length >= 14)
         handshake_type = (uint8_t)data[13];
-    }
 
     av_log(s1, AV_LOG_VERBOSE, "WHIP: DTLS state %s %s, done=%u, arq=%u, r0=%d, r1=%d, len=%u, cnt=%u, size=%u, hs=%u\n",
         "Active", (incoming? "RECV":"SEND"), ctx->dtls_done_for_us, ctx->dtls_arq_packets, r0, r1, length,
         content_type, size, handshake_type);
-}
-
-/**
- * The return value of verify_callback controls the strategy of the further verification process. If verify_callback
- * returns 0, the verification process is immediately stopped with "verification failed" state. If SSL_VERIFY_PEER is
- * set, a verification failure alert is sent to the peer and the TLS/SSL handshake is terminated. If verify_callback
- * returns 1, the verification process is continued. If verify_callback always returns 1, the TLS/SSL handshake will
- * not be terminated with respect to verification failures and the connection will be established. The calling process
- * can however retrieve the error code of the last verification error using SSL_get_verify_result(3) or by maintaining
- * its own error storage managed by verify_callback.
- */
-static int openssl_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
-{
-    /* Always OK, we don't check the certificate of client, because we allow client self-sign certificate. */
-    return 1;
 }
 
 /**
@@ -471,8 +438,6 @@ static av_cold int openssl_init_dtls_context(DTLSContext *ctx, SSL_CTX *dtls_ctx
         ret = AVERROR(EINVAL);
         goto end;
     }
-    /* Server will send Certificate Request. */
-    SSL_CTX_set_verify(dtls_ctx, SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE, openssl_verify_callback);
     /* The depth count is "level 0:peer certificate", "level 1: CA certificate",
      * "level 2: higher level CA certificate", and so on. */
     SSL_CTX_set_verify_depth(dtls_ctx, 4);
@@ -636,6 +601,10 @@ static int dtls_context_handshake(DTLSContext *ctx)
     void *s1 = ctx->log_avcl;
 
     dtls_ctx = SSL_CTX_new(DTLS_client_method());
+    if (!dtls_ctx) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
 
     if (!ctx->udp_uc) {
         av_log(s1, AV_LOG_ERROR, "DTLS: No UDP context\n");
@@ -651,9 +620,23 @@ static int dtls_context_handshake(DTLSContext *ctx)
 
     /* The dtls should not be created unless the dtls_ctx has been initialized. */
     dtls = SSL_new(dtls_ctx);
+    if (!dtls) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
 
     bio_in = BIO_new(BIO_s_mem());
+    if (!bio_in) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
     bio_out = BIO_new(BIO_s_mem());
+    if (!bio_out) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
     SSL_set_bio(dtls, bio_in, bio_out);
 
     ret = openssl_init_dtls_ssl(ctx, dtls);
@@ -794,10 +777,9 @@ static av_cold int whip_init(AVFormatContext *s)
     av_log(s, AV_LOG_INFO, "WHIP: Init ice_arq_max=%d, ice_arq_timeout=%d, dtls_arq_max=%d, dtls_arq_timeout=%d pkt_size=%d\n",
         rtc->ice_arq_max, rtc->ice_arq_timeout, rtc->dtls_arq_max, rtc->dtls_arq_timeout, rtc->pkt_size);
 
-    if (rtc->pkt_size < ideal_pkt_size) {
+    if (rtc->pkt_size < ideal_pkt_size)
         av_log(s, AV_LOG_WARNING, "WHIP: pkt_size=%d(<%d) is too small, may cause packet loss\n",
             rtc->pkt_size, ideal_pkt_size);
-    }
 
     return 0;
 }
@@ -1682,11 +1664,8 @@ static int ice_handshake(AVFormatContext *s)
             break;
 
         /* When a binding request is received, it is necessary to respond immediately. */
-        if (ice_is_binding_request(res_buf, ret)) {
-            if ((ret = ice_handle_binding_request(s, res_buf, ret)) < 0) {
-                goto end;
-            }
-        }
+        if (ice_is_binding_request(res_buf, ret) && (ret = ice_handle_binding_request(s, res_buf, ret)) < 0)
+            goto end;
     }
 
     /* Wait just for a small while to get the possible binding request from server. */
@@ -1711,15 +1690,15 @@ static int ice_handshake(AVFormatContext *s)
 
         /* When a binding request is received, it is necessary to respond immediately. */
         if (ice_is_binding_request(res_buf, ret)) {
-            if ((ret = ice_handle_binding_request(s, res_buf, ret)) < 0) {
+            if ((ret = ice_handle_binding_request(s, res_buf, ret)) < 0)
                 goto end;
-            }
             break;
         }
     }
 
-    av_log(s, AV_LOG_INFO, "WHIP: ICE STUN ok, url=udp://%s:%d, username=%s:%s, req=%dB, res=%dB, arq=%d\n",
-        rtc->ice_host, rtc->ice_port, rtc->ice_ufrag_remote, rtc->ice_ufrag_local, size, ret,
+    av_log(s, AV_LOG_INFO, "WHIP: ICE STUN ok, url=udp://%s:%d, location=%s, username=%s:%s, req=%dB, res=%dB, arq=%d\n",
+        rtc->ice_host, rtc->ice_port, rtc->whip_resource_url ? rtc->whip_resource_url : "",
+        rtc->ice_ufrag_remote, rtc->ice_ufrag_local, size, ret,
         rtc->ice_arq_max - fast_retries);
     ret = 0;
 
@@ -1922,9 +1901,8 @@ static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
     is_rtcp = buf[1] >= 192 && buf[1] <= 223;
     payload_type = buf[1] & 0x7f;
     is_video = payload_type == rtc->video_payload_type;
-    if (!is_rtcp && payload_type != rtc->video_payload_type && payload_type != rtc->audio_payload_type) {
+    if (!is_rtcp && payload_type != rtc->video_payload_type && payload_type != rtc->audio_payload_type)
         return 0;
-    }
 
     /**
      * For video, the STAP-A with SPS/PPS should:
@@ -1935,14 +1913,12 @@ static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
         nalu_header = buf[12] & 0x1f;
         if (nalu_header == NALU_TYPE_STAP_A) {
             /* Reset the marker bit to 0. */
-            if (buf[1] & 0x80) {
+            if (buf[1] & 0x80)
                 buf[1] &= 0x7f;
-            }
 
             /* Reset the NRI to the first NALU's NRI. */
-            if (buf_size > 15 && (buf[15]&0x60) != (buf[12]&0x60)) {
+            if (buf_size > 15 && (buf[15]&0x60) != (buf[12]&0x60))
                 buf[12] = (buf[12]&0x80) | (buf[15]&0x60) | (buf[12]&0x1f);
-            }
         }
     }
 
@@ -2076,7 +2052,7 @@ static int whip_dispose(AVFormatContext *s)
         }
     }
 
-    av_log(s, AV_LOG_INFO, "WHIP: Dispose resource %s\n", rtc->whip_resource_url);
+    av_log(s, AV_LOG_INFO, "WHIP: Dispose resource %s ok\n", rtc->whip_resource_url);
 
 end:
     ffurl_closep(&whip_uc);
@@ -2149,9 +2125,8 @@ static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
         if (ret == AVERROR(EINVAL)) {
             av_log(s, AV_LOG_WARNING, "Ignore failed to write packet=%dB, ret=%d\n", pkt->size, ret);
             ret = 0;
-        } else {
+        } else
             av_log(s, AV_LOG_ERROR, "Failed to write packet, size=%d\n", pkt->size);
-        }
         return ret;
     }
 
