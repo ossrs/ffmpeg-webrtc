@@ -189,41 +189,32 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
     int ret = 0, serial, expire_day, i, n = 0;
     AVBPrint fingerprint;
     unsigned char md[EVP_MAX_MD_SIZE];
-    const char *aor = "ffmpeg.org";
+    const char *aor = "ffmpeg.org", *curve = NULL;
     X509_NAME* subject = NULL;
-    EC_GROUP *ecgroup = NULL;
-    EC_KEY* dtls_eckey = NULL;
     EVP_PKEY *dtls_pkey = NULL;
     X509 *dtls_cert = NULL;
     void *s1 = ctx->log_avcl;
 
-    ctx->dtls_cert = dtls_cert = X509_new();
-    ctx->dtls_pkey = dtls_pkey = EVP_PKEY_new();
-    dtls_eckey = EC_KEY_new();
-
     /* To prevent a crash during cleanup, always initialize it. */
     av_bprint_init(&fingerprint, 1, MAX_SDP_SIZE);
+
+    ctx->dtls_cert = dtls_cert = X509_new();
+    if (!dtls_cert) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
 
     /* Should use the curves in ClientHello.supported_groups, for example:
      *      Supported Group: x25519 (0x001d)
      *      Supported Group: secp256r1 (0x0017)
      *      Supported Group: secp384r1 (0x0018)
-     * note that secp256r1 in openssl is called NID_X9_62_prime256v1, not NID_secp256k1
+     * Note that secp256r1 in openssl is called NID_X9_62_prime256v1 or prime256v1 in string,
+     * not NID_secp256k1 or secp256k1 in string
      */
-    ecgroup = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
-
-    if (EC_KEY_set_group(dtls_eckey, ecgroup) != 1) {
-        av_log(s1, AV_LOG_ERROR, "DTLS: EC_KEY_set_group failed\n");
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-    if (EC_KEY_generate_key(dtls_eckey) != 1) {
-        av_log(s1, AV_LOG_ERROR, "DTLS: EC_KEY_generate_key failed\n");
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-    if (EVP_PKEY_set1_EC_KEY(dtls_pkey, dtls_eckey) != 1) {
-        av_log(s1, AV_LOG_ERROR, "DTLS: EVP_PKEY_set1_EC_KEY failed\n");
+    curve = "prime256v1";
+    ctx->dtls_pkey = dtls_pkey = EVP_EC_gen(curve);
+    if (!dtls_pkey) {
+        av_log(s1, AV_LOG_ERROR, "DTLS: EVP_EC_gen curve=%s failed\n", curve);
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -313,11 +304,9 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
         goto end;
     }
 
-    av_log(s1, AV_LOG_INFO, "DTLS: Fingerprint %s\n", ctx->dtls_fingerprint);
+    av_log(s1, AV_LOG_INFO, "DTLS: Curve=%s, fingerprint %s\n", curve, ctx->dtls_fingerprint);
 
 end:
-    EC_KEY_free(dtls_eckey);
-    EC_GROUP_free(ecgroup);
     X509_NAME_free(subject);
     av_bprint_finalize(&fingerprint, NULL);
     return ret;
