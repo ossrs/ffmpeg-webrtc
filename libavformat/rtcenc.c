@@ -536,7 +536,7 @@ static int openssl_drive_context(DTLSContext *ctx, SSL *dtls, BIO *bio_in, BIO *
             ret = ffurl_read(ctx->udp_uc, buf, sizeof(buf));
 
             /* Ignore other packets, such as ICE indication, except DTLS. */
-            if (ret < 13 || buf[0] <= 19 || buf[0] >= 64)
+            if (ret > 0 && (ret < 13 || buf[0] <= 19 || buf[0] >= 64))
                 continue;
 
             /* Got DTLS response successfully. */
@@ -559,13 +559,13 @@ static int openssl_drive_context(DTLSContext *ctx, SSL *dtls, BIO *bio_in, BIO *
              * occurs, it returns -1. */
             r0 = DTLSv1_handle_timeout(dtls);
             if (!r0) {
-                av_usleep(ctx->dtls_arq_timeout * 1000);
+                av_usleep(DTLS_SSL_TIMER_BASE + ctx->dtls_arq_timeout * 1000);
                 continue; /* no timeout had expired. */
             }
             if (r0 != 1) {
                 r1 = SSL_get_error(dtls, r0);
                 av_log(s1, AV_LOG_ERROR, "DTLS: Handle timeout, loop=%d, content=%d, handshake=%d, r0=%d, r1=%d\n",
-                       loop, req_ct, req_ht, r0, r1);
+                    loop, req_ct, req_ht, r0, r1);
                 return AVERROR(EIO);
             }
 
@@ -604,6 +604,7 @@ static int dtls_context_handshake(DTLSContext *ctx)
     SSL *dtls = NULL;
     const char* dst = "EXTRACTOR-dtls_srtp";
     BIO *bio_in = NULL, *bio_out = NULL;
+    int64_t starttime = av_gettime();
     void *s1 = ctx->log_avcl;
 
     dtls_ctx = SSL_CTX_new(DTLS_client_method());
@@ -654,7 +655,8 @@ static int dtls_context_handshake(DTLSContext *ctx)
     for (loop = 0; loop < 64 && !ctx->dtls_done_for_us; loop++) {
         ret = openssl_drive_context(ctx, dtls, bio_in, bio_out, loop);
         if (ret < 0) {
-            av_log(s1, AV_LOG_ERROR, "Failed to drive SSL context\n");
+            av_log(s1, AV_LOG_ERROR, "Failed to drive SSL context, cost=%dms\n",
+                (int)(av_gettime() - starttime) / 1000);
             goto end;
         }
     }
@@ -673,8 +675,9 @@ static int dtls_context_handshake(DTLSContext *ctx)
         goto end;
     }
 
-    av_log(s1, AV_LOG_INFO, "WHIP: DTLS handshake done=%d, arq=%d, srtp_material=%luB\n",
-        ctx->dtls_done_for_us, ctx->dtls_arq_packets, sizeof(ctx->dtls_srtp_material));
+    av_log(s1, AV_LOG_INFO, "WHIP: DTLS handshake done=%d, arq=%d, srtp_material=%luB, cost=%dms\n",
+        ctx->dtls_done_for_us, ctx->dtls_arq_packets, sizeof(ctx->dtls_srtp_material),
+        (int)(av_gettime() - starttime) / 1000);
 
 end:
     SSL_free(dtls);
