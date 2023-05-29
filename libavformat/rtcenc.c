@@ -139,7 +139,6 @@ enum StunAttr {
     STUN_ATTR_FINGERPRINT               = 0x8028, /// rfc5389
 };
 
-#if CONFIG_OPENSSL
 typedef struct DTLSContext {
     /* For av_log to write log to this category. */
     void *log_avcl;
@@ -684,8 +683,6 @@ end:
     SSL_CTX_free(dtls_ctx);
     return ret;
 }
-
-#endif
 
 typedef struct RTCContext {
     AVClass *av_class;
