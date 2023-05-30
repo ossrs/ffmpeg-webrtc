@@ -1361,25 +1361,28 @@ This muxer supports the following options:
 
 @table @option
 
-@item ice_arq_max @var{size}
+@item ice_arq_max @var{integer}
 Set the maximum number of retransmissions for the ICE ARQ mechanism.
 Default value is 5.
 
-@item ice_arq_timeout @var{size}
+@item ice_arq_timeout @var{integer}
 Set the start timeout in milliseconds for the ICE ARQ mechanism.
 Default value is 30.
 
-@item dtls_arq_max @var{size}
+@item dtls_arq_max @var{integer}
 Set the maximum number of retransmissions for the DTLS ARQ mechanism.
 Default value is 5.
 
-@item dtls_arq_timeout @var{size}
+@item dtls_arq_timeout @var{integer}
 Set the start timeout in milliseconds for the DTLS ARQ mechanism.
 Default value is 50.
 
-@item pkt_size @var{size}
+@item pkt_size @var{integer}
 Set the maximum size, in bytes, of RTP packets that send out.
 Default value is 1500.
+
+@item authorization @var{string}
+The optional Bearer token for WHIP Authorization.
 
 @end table
 
