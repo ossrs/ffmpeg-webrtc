@@ -26,8 +26,20 @@
 #else
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#if OPENSSL_VERSION_NUMBER < 0x1010102fL
-#error "OpenSSL version 1.1.1b or newer is required"
+/**
+ * Minimum required version of OpenSSL.
+ *          MM NN FF PP S
+ * 0x1010102fL = 0x1 01 01 02 fL            // 1.1.1b release
+ *   MM(major) = 0x1                        // 1.*
+ *     NN(minor) = 0x01                     // 1.1.*
+ *          FF(fix) = 0x01                  // 1.1.1*
+ *     PP(patch) = 'a' + 0x02 - 1 = 'b'     // 1.1.1b *
+ *              S(status) = 0xf = release   // 1.1.1b release
+ * Status 0 for development, 1 to e for betas 1 to 14, and f for release.
+ * Please use the stable version for DTLS, see https://github.com/openssl/openssl/issues/346
+ */
+#if OPENSSL_VERSION_NUMBER < 0x100010b0L /* OpenSSL 1.0.1k */
+#error "OpenSSL version 1.0.1k or newer is required"
 #endif
 #endif
 
@@ -172,9 +184,74 @@ typedef struct DTLSContext {
     int dtls_arq_max;
     /* The step start timeout in ms for DTLS transmission. */
     int dtls_arq_timeout;
-    /* The size of RTP packet, should generally be set to MTU. */
+    /**
+     * The size of RTP packet, should generally be set to MTU.
+     * Note that pion requires a smaller value, for example, 1200.
+     */
     int pkt_size;
 } DTLSContext;
+
+static int openssl_gen_private_key(DTLSContext *ctx)
+{
+    int ret = 0;
+#if OPENSSL_VERSION_NUMBER < 0x30000000L /* OpenSSL 3.0 */
+    EC_GROUP *ecgroup = NULL;
+    EC_KEY* dtls_eckey = NULL;
+#else
+    const char *curve = "prime256v1";
+#endif
+    void *s1 = ctx->log_avcl;
+
+    /* Should use the curves in ClientHello.supported_groups, for example:
+     *      Supported Group: x25519 (0x001d)
+     *      Supported Group: secp256r1 (0x0017)
+     *      Supported Group: secp384r1 (0x0018)
+     * Note that secp256r1 in openssl is called NID_X9_62_prime256v1 or prime256v1 in string,
+     * not NID_secp256k1 or secp256k1 in string
+     */
+#if OPENSSL_VERSION_NUMBER < 0x30000000L /* OpenSSL 3.0 */
+    ctx->dtls_pkey = EVP_PKEY_new();
+    dtls_eckey = EC_KEY_new();
+    ecgroup = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+
+#if OPENSSL_VERSION_NUMBER < 0x10100000L // v1.1.x
+    /* For openssl 1.0, we must set the group parameters, so that cert is ok. */
+    EC_GROUP_set_asn1_flag(ecgroup, OPENSSL_EC_NAMED_CURVE);
+#endif
+
+    if (EC_KEY_set_group(dtls_eckey, ecgroup) != 1) {
+        av_log(s1, AV_LOG_ERROR, "DTLS: EC_KEY_set_group failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (EC_KEY_generate_key(dtls_eckey) != 1) {
+        av_log(s1, AV_LOG_ERROR, "DTLS: EC_KEY_generate_key failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (EVP_PKEY_set1_EC_KEY(ctx->dtls_pkey, dtls_eckey) != 1) {
+        av_log(s1, AV_LOG_ERROR, "DTLS: EVP_PKEY_set1_EC_KEY failed\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+#else
+    ctx->dtls_pkey = EVP_EC_gen(curve);
+    if (!ctx->dtls_pkey) {
+        av_log(s1, AV_LOG_ERROR, "DTLS: EVP_EC_gen curve=%s failed\n", curve);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+#endif
+
+end:
+#if OPENSSL_VERSION_NUMBER < 0x30000000L /* OpenSSL 3.0 */
+    EC_KEY_free(dtls_eckey);
+    EC_GROUP_free(ecgroup);
+#endif
+    return ret;
+}
 
 /**
  * Generate a self-signed certificate and private key for DTLS.
@@ -186,12 +263,11 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
     unsigned char md[EVP_MAX_MD_SIZE];
     const char *aor = "ffmpeg.org", *curve = NULL;
     X509_NAME* subject = NULL;
-    EVP_PKEY *dtls_pkey = NULL;
     X509 *dtls_cert = NULL;
     void *s1 = ctx->log_avcl;
 
     /* To prevent a crash during cleanup, always initialize it. */
-    av_bprint_init(&fingerprint, 1, MAX_SDP_SIZE);
+    av_bprint_init(&fingerprint, 1, MAX_URL_SIZE);
 
     ctx->dtls_cert = dtls_cert = X509_new();
     if (!dtls_cert) {
@@ -199,20 +275,9 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
         goto end;
     }
 
-    /* Should use the curves in ClientHello.supported_groups, for example:
-     *      Supported Group: x25519 (0x001d)
-     *      Supported Group: secp256r1 (0x0017)
-     *      Supported Group: secp384r1 (0x0018)
-     * Note that secp256r1 in openssl is called NID_X9_62_prime256v1 or prime256v1 in string,
-     * not NID_secp256k1 or secp256k1 in string
-     */
-    curve = "prime256v1";
-    ctx->dtls_pkey = dtls_pkey = EVP_EC_gen(curve);
-    if (!dtls_pkey) {
-        av_log(s1, AV_LOG_ERROR, "DTLS: EVP_EC_gen curve=%s failed\n", curve);
-        ret = AVERROR(EINVAL);
+    /* Generate a private key to ctx->dtls_pkey. */
+    if ((ret = openssl_gen_private_key(ctx)) < 0)
         goto end;
-    }
 
     /* Generate a self-signed certificate. */
     subject = X509_NAME_new();
@@ -263,13 +328,13 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
         goto end;
     }
 
-    if (X509_set_pubkey(dtls_cert, dtls_pkey) != 1) {
+    if (X509_set_pubkey(dtls_cert, ctx->dtls_pkey) != 1) {
         av_log(s1, AV_LOG_ERROR, "WHIP: Failed to set public key\n");
         ret = AVERROR(EINVAL);
         goto end;
     }
 
-    if (!X509_sign(dtls_cert, dtls_pkey, EVP_sha1())) {
+    if (!X509_sign(dtls_cert, ctx->dtls_pkey, EVP_sha1())) {
         av_log(s1, AV_LOG_ERROR, "WHIP: Failed to sign certificate\n");
         ret = AVERROR(EINVAL);
         goto end;
@@ -287,7 +352,7 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
             av_bprintf(&fingerprint, ":");
     }
     if (!av_bprint_is_complete(&fingerprint)) {
-        av_log(s1, AV_LOG_ERROR, "Fingerprint %d exceed max %d, %s\n", ret, MAX_SDP_SIZE, fingerprint.str);
+        av_log(s1, AV_LOG_ERROR, "Fingerprint %d exceed max %d, %s\n", ret, MAX_URL_SIZE, fingerprint.str);
         ret = AVERROR(EIO);
         goto end;
     }
@@ -303,7 +368,7 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
         goto end;
     }
 
-    av_log(s1, AV_LOG_INFO, "DTLS: Curve=%s, fingerprint %s\n", curve, ctx->dtls_fingerprint);
+    av_log(s1, AV_LOG_INFO, "DTLS: Curve=%s, fingerprint %s\n", curve ? curve : "", ctx->dtls_fingerprint);
 
 end:
     X509_NAME_free(subject);
@@ -367,6 +432,7 @@ static void openssl_on_info(const SSL *dtls, int where, int ret)
     }
 }
 
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L /* OpenSSL 1.1.1 */
 static unsigned int openssl_dtls_timer_cb(SSL *dtls, unsigned int previous_us)
 {
     DTLSContext *ctx = (DTLSContext*)SSL_get_ex_data(dtls, 0);
@@ -388,6 +454,7 @@ static unsigned int openssl_dtls_timer_cb(SSL *dtls, unsigned int previous_us)
 
     return timeout_us;
 }
+#endif
 
 static void openssl_state_trace(DTLSContext *ctx, uint8_t *data, int length, int incoming, int r0, int r1)
 {
@@ -419,12 +486,14 @@ static av_cold int openssl_init_dtls_context(DTLSContext *ctx, SSL_CTX *dtls_ctx
     EVP_PKEY *dtls_pkey = ctx->dtls_pkey;
     X509 *dtls_cert = ctx->dtls_cert;
 
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L /* OpenSSL 1.0.2 */
     /* For ECDSA, we could set the curves list. */
     if (SSL_CTX_set1_curves_list(dtls_ctx, "P-521:P-384:P-256") != 1) {
         av_log(s1, AV_LOG_ERROR, "DTLS: SSL_CTX_set1_curves_list failed\n");
         ret = AVERROR(EINVAL);
         goto end;
     }
+#endif
 
     /* We use "ALL", while you can use "DEFAULT" means "ALL:!EXPORT:!LOW:!aNULL:!eNULL:!SSLv2" */
     if (SSL_CTX_set_cipher_list(dtls_ctx, DTLS_CIPHER_SUTES) != 1) {
@@ -475,8 +544,10 @@ static av_cold int openssl_init_dtls_ssl(DTLSContext *ctx, SSL *dtls)
     /* Avoid dtls negotiate failed, limit the max size of DTLS fragment. */
     SSL_set_mtu(dtls, ctx->pkt_size);
 
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L /* OpenSSL 1.1.1 */
     /* Set the callback for ARQ timer. */
     DTLS_set_timer_cb(dtls, openssl_dtls_timer_cb);
+#endif
 
     /* Setup DTLS as active, which is client role. */
     SSL_set_connect_state(dtls);
@@ -606,7 +677,11 @@ static int dtls_context_handshake(DTLSContext *ctx)
     int64_t starttime = av_gettime();
     void *s1 = ctx->log_avcl;
 
+#if OPENSSL_VERSION_NUMBER < 0x10002000L /* OpenSSL v1.0.2 */
+    dtls_ctx = SSL_CTX_new(DTLSv1_method());
+#else
     dtls_ctx = SSL_CTX_new(DTLS_client_method());
+#endif
     if (!dtls_ctx) {
         ret = AVERROR(ENOMEM);
         goto end;
@@ -755,8 +830,16 @@ typedef struct RTCContext {
     int dtls_arq_max;
     /* The step start timeout in ms for DTLS transmission. */
     int dtls_arq_timeout;
-    /* The size of RTP packet, should generally be set to MTU. */
+    /**
+     * The size of RTP packet, should generally be set to MTU.
+     * Note that pion requires a smaller value, for example, 1200.
+     */
     int pkt_size;
+    /**
+     * The optional Bearer token for WHIP Authorization.
+     * See https://www.ietf.org/archive/id/draft-ietf-wish-whip-08.html#name-authentication-and-authoriz
+     */
+    char* authorization;
 } RTCContext;
 
 static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size);
@@ -987,45 +1070,6 @@ static int parse_codec(AVFormatContext *s)
 
 /**
  * Generate SDP offer according to the codec parameters, DTLS and ICE information.
- * The below is an example of SDP offer:
- *
- *       v=0
- *       o=FFmpeg 4489045141692799359 2 IN IP4 127.0.0.1
- *       s=FFmpegPublishSession
- *       t=0 0
- *       a=group:BUNDLE 0 1
- *       a=extmap-allow-mixed
- *       a=msid-semantic: WMS
- *
- *       m=audio 9 UDP/TLS/RTP/SAVPF 111
- *       c=IN IP4 0.0.0.0
- *       a=ice-ufrag:a174B
- *       a=ice-pwd:wY8rJ3gNLxL3eWZs6UPOxy
- *       a=fingerprint:sha-256 EE:FE:A2:E5:6A:21:78:60:71:2C:21:DC:1A:2C:98:12:0C:E8:AD:68:07:61:1B:0E:FC:46:97:1E:BC:97:4A:54
- *       a=setup:actpass
- *       a=mid:0
- *       a=sendonly
- *       a=msid:FFmpeg audio
- *       a=rtcp-mux
- *       a=rtpmap:111 opus/48000/2
- *       a=ssrc:4267647086 cname:FFmpeg
- *       a=ssrc:4267647086 msid:FFmpeg audio
- *
- *       m=video 9 UDP/TLS/RTP/SAVPF 106
- *       c=IN IP4 0.0.0.0
- *       a=ice-ufrag:a174B
- *       a=ice-pwd:wY8rJ3gNLxL3eWZs6UPOxy
- *       a=fingerprint:sha-256 EE:FE:A2:E5:6A:21:78:60:71:2C:21:DC:1A:2C:98:12:0C:E8:AD:68:07:61:1B:0E:FC:46:97:1E:BC:97:4A:54
- *       a=setup:actpass
- *       a=mid:1
- *       a=sendonly
- *       a=msid:FFmpeg video
- *       a=rtcp-mux
- *       a=rtcp-rsize
- *       a=rtpmap:106 H264/90000
- *       a=fmtp:106 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
- *       a=ssrc:107169110 cname:FFmpeg
- *       a=ssrc:107169110 msid:FFmpeg video
  *
  * Note that we don't use av_sdp_create to generate SDP offer because it doesn't
  * support DTLS and ICE information.
@@ -1156,42 +1200,6 @@ end:
 
 /**
  * Exchange SDP offer with WebRTC peer to get the answer.
- * The below is an example of SDP answer:
- *
- *       v=0
- *       o=SRS/6.0.42(Bee) 107408542208384 2 IN IP4 0.0.0.0
- *       s=SRSPublishSession
- *       t=0 0
- *       a=ice-lite
- *       a=group:BUNDLE 0 1
- *       a=msid-semantic: WMS live/show
- *
- *       m=audio 9 UDP/TLS/RTP/SAVPF 111
- *       c=IN IP4 0.0.0.0
- *       a=ice-ufrag:ex9061f9
- *       a=ice-pwd:bi8k19m9n836187b00d1gm3946234w85
- *       a=fingerprint:sha-256 68:DD:7A:95:27:BD:0A:99:F4:7A:83:21:2F:50:15:2A:1D:1F:8A:D8:96:24:42:2D:A1:83:99:BF:F1:E2:11:A2
- *       a=setup:passive
- *       a=mid:0
- *       a=recvonly
- *       a=rtcp-mux
- *       a=rtcp-rsize
- *       a=rtpmap:111 opus/48000/2
- *       a=candidate:0 1 udp 2130706431 172.20.10.7 8000 typ host generation 0
- *
- *       m=video 9 UDP/TLS/RTP/SAVPF 106
- *       c=IN IP4 0.0.0.0
- *       a=ice-ufrag:ex9061f9
- *       a=ice-pwd:bi8k19m9n836187b00d1gm3946234w85
- *       a=fingerprint:sha-256 68:DD:7A:95:27:BD:0A:99:F4:7A:83:21:2F:50:15:2A:1D:1F:8A:D8:96:24:42:2D:A1:83:99:BF:F1:E2:11:A2
- *       a=setup:passive
- *       a=mid:1
- *       a=recvonly
- *       a=rtcp-mux
- *       a=rtcp-rsize
- *       a=rtpmap:106 H264/90000
- *       a=fmtp:106 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01e
- *       a=candidate:0 1 udp 2130706431 172.20.10.7 8000 typ host generation 0
  *
  * @return 0 if OK, AVERROR_xxx on error
  */
@@ -1219,9 +1227,17 @@ static int exchange_sdp(AVFormatContext *s)
         goto end;
     }
 
-    snprintf(buf, sizeof(buf),
+    ret = snprintf(buf, sizeof(buf),
              "Cache-Control: no-cache\r\n"
              "Content-Type: application/sdp\r\n");
+    if (rtc->authorization)
+        ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", rtc->authorization);
+    if (ret <= 0 || ret >= sizeof(buf)) {
+        av_log(s, AV_LOG_ERROR, "Failed to generate headers, size=%d, %s\n", ret, buf);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
     av_opt_set(whip_uc->priv_data, "headers", buf, 0);
     av_opt_set(whip_uc->priv_data, "chunked_post", "0", 0);
     av_opt_set_bin(whip_uc->priv_data, "post_data", rtc->sdp_offer, (int)strlen(rtc->sdp_offer), 0);
@@ -1259,6 +1275,12 @@ static int exchange_sdp(AVFormatContext *s)
             ret = AVERROR(EIO);
             goto end;
         }
+    }
+
+    if (!av_strstart(bp.str, "v=", NULL)) {
+        av_log(s, AV_LOG_ERROR, "Invalid answer: %s\n", bp.str);
+        ret = AVERROR(EINVAL);
+        goto end;
     }
 
     rtc->sdp_answer = av_strdup(bp.str);
@@ -2117,6 +2139,11 @@ static int rtc_write_packet(AVFormatContext *s, AVPacket *pkt)
     /* For audio OPUS stream, correct the timestamp. */
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
         pkt->dts = pkt->pts = rtc->audio_jitter_base;
+        // TODO: FIXME: For opus 48khz, each frame is 20ms which is 48000*20/1000 = 960. It appears that there is a
+        //  bug introduced by libopus regarding the timestamp. Instead of being exactly 960, there is a slight
+        //  deviation, such as 956 or 970. This deviation can cause Chrome to play the audio stream with noise.
+        //  Although we are unsure of the root cause, we can simply correct the timestamp by using the timebase of
+        //  Opus. We need to conduct further research and remove this line.
         rtc->audio_jitter_base += 960;
     }
 
@@ -2168,6 +2195,7 @@ static av_cold void rtc_deinit(AVFormatContext *s)
     av_freep(&rtc->ice_pwd_remote);
     av_freep(&rtc->ice_protocol);
     av_freep(&rtc->ice_host);
+    av_freep(&rtc->authorization);
     ffurl_closep(&rtc->udp_uc);
     ff_srtp_free(&rtc->srtp_audio_send);
     ff_srtp_free(&rtc->srtp_video_send);
@@ -2182,8 +2210,9 @@ static const AVOption options[] = {
     { "ice_arq_max",        "Maximum number of retransmissions for the ICE ARQ mechanism",      OFFSET(ice_arq_max),        AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
     { "ice_arq_timeout",    "Start timeout in milliseconds for the ICE ARQ mechanism",          OFFSET(ice_arq_timeout),    AV_OPT_TYPE_INT,    { .i64 = 30 },      -1, INT_MAX, DEC },
     { "dtls_arq_max",       "Maximum number of retransmissions for the DTLS ARQ mechanism",     OFFSET(dtls_arq_max),       AV_OPT_TYPE_INT,    { .i64 = 5 },       -1, INT_MAX, DEC },
-    { "dtls_arq_timeout",   "Start timeout in milliseconds for the DTLS ARQ mechanism",         OFFSET(dtls_arq_timeout),   AV_OPT_TYPE_INT,    { .i64 = 50 },     -1, INT_MAX, DEC },
-    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out",         OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1500 },    -1, INT_MAX, DEC },
+    { "dtls_arq_timeout",   "Start timeout in milliseconds for the DTLS ARQ mechanism",         OFFSET(dtls_arq_timeout),   AV_OPT_TYPE_INT,    { .i64 = 50 },      -1, INT_MAX, DEC },
+    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out",         OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, DEC },
+    { "authorization",      "The optional Bearer token for WHIP Authorization",                 OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
     { NULL },
 };
 
