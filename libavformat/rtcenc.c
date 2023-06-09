@@ -1179,6 +1179,7 @@ static int parse_codec(AVFormatContext *s)
 static int generate_sdp_offer(AVFormatContext *s)
 {
     int ret = 0, profile, level, profile_iop;
+    const char *acodec_name = NULL, *vcodec_name = NULL;
     AVBPrint bp;
     RTCContext *rtc = s->priv_data;
 
@@ -1215,6 +1216,9 @@ static int generate_sdp_offer(AVFormatContext *s)
         RTC_SDP_CREATOR_IP);
 
     if (rtc->audio_par) {
+        if (rtc->audio_par->codec_id == AV_CODEC_ID_OPUS)
+            acodec_name = "opus";
+
         av_bprintf(&bp, ""
             "m=audio 9 UDP/TLS/RTP/SAVPF %u\r\n"
             "c=IN IP4 0.0.0.0\r\n"
@@ -1226,7 +1230,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             "a=sendonly\r\n"
             "a=msid:FFmpeg audio\r\n"
             "a=rtcp-mux\r\n"
-            "a=rtpmap:%u opus/%d/%d\r\n"
+            "a=rtpmap:%u %s/%d/%d\r\n"
             "a=ssrc:%u cname:FFmpeg\r\n"
             "a=ssrc:%u msid:FFmpeg audio\r\n",
             rtc->audio_payload_type,
@@ -1234,6 +1238,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             rtc->ice_pwd_local,
             rtc->dtls_ctx.dtls_fingerprint,
             rtc->audio_payload_type,
+            acodec_name,
             rtc->audio_par->sample_rate,
             rtc->audio_par->ch_layout.nb_channels,
             rtc->audio_ssrc,
@@ -1241,9 +1246,14 @@ static int generate_sdp_offer(AVFormatContext *s)
     }
 
     if (rtc->video_par) {
-        profile = rtc->video_par->profile < 0 ? 0x42 : rtc->video_par->profile;
-        level = rtc->video_par->level < 0 ? 30 : rtc->video_par->level;
-        profile_iop = profile & FF_PROFILE_H264_CONSTRAINED;
+        profile_iop = profile = rtc->video_par->profile < 0 ? 0x42 : rtc->video_par->profile;
+        level = rtc->video_par->level < 0 ? 0x1e : rtc->video_par->level;
+        if (rtc->video_par->codec_id == AV_CODEC_ID_H264) {
+            vcodec_name = "H264";
+            profile_iop &= FF_PROFILE_H264_CONSTRAINED;
+            profile &= (~FF_PROFILE_H264_CONSTRAINED);
+        }
+
         av_bprintf(&bp, ""
             "m=video 9 UDP/TLS/RTP/SAVPF %u\r\n"
             "c=IN IP4 0.0.0.0\r\n"
@@ -1256,7 +1266,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             "a=msid:FFmpeg video\r\n"
             "a=rtcp-mux\r\n"
             "a=rtcp-rsize\r\n"
-            "a=rtpmap:%u H264/90000\r\n"
+            "a=rtpmap:%u %s/90000\r\n"
             "a=fmtp:%u level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=%02x%02x%02x\r\n"
             "a=ssrc:%u cname:FFmpeg\r\n"
             "a=ssrc:%u msid:FFmpeg video\r\n",
@@ -1265,8 +1275,9 @@ static int generate_sdp_offer(AVFormatContext *s)
             rtc->ice_pwd_local,
             rtc->dtls_ctx.dtls_fingerprint,
             rtc->video_payload_type,
+            vcodec_name,
             rtc->video_payload_type,
-            profile & (~FF_PROFILE_H264_CONSTRAINED),
+            profile,
             profile_iop,
             level,
             rtc->video_ssrc,
