@@ -23,6 +23,8 @@
 #include <openssl/err.h>
 
 #include "libavcodec/avcodec.h"
+#include "libavcodec/h264.h"
+#include "libavcodec/startcode.h"
 #include "libavutil/base64.h"
 #include "libavutil/bprint.h"
 #include "libavutil/crc.h"
@@ -31,6 +33,7 @@
 #include "libavutil/opt.h"
 #include "libavutil/random_seed.h"
 #include "libavutil/time.h"
+#include "avc.h"
 #include "avio_internal.h"
 #include "http.h"
 #include "internal.h"
@@ -1087,6 +1090,56 @@ static av_cold int whip_init(AVFormatContext *s)
 }
 
 /**
+ * When utilizing an encoder, such as libx264, to encode a stream, the extradata in
+ * par->extradata contains the SPS, which includes profile and level information.
+ * However, the profile and level of par remain unspecified. Therefore, it is necessary
+ * to extract the profile and level data from the extradata and assign it to the par's
+ * profile and level.
+ *
+ * When copying a stream, the extradata, as well as the profile and level of the par,
+ * are already set by demuxer.
+ */
+static int parse_profile_level(AVFormatContext *s, AVCodecParameters *par)
+{
+    int ret = 0;
+    const uint8_t *r = par->extradata, *r1, *end = par->extradata + par->extradata_size;
+    H264SPS seq, *const sps = &seq;
+    uint32_t state;
+    RTCContext *rtc = s->priv_data;
+
+    if (par->codec_id != AV_CODEC_ID_H264)
+        return ret;
+
+    if (par->profile != FF_PROFILE_UNKNOWN && par->level != FF_LEVEL_UNKNOWN)
+        return ret;
+
+    while (1) {
+        r = avpriv_find_start_code(r, end, &state);
+        if (r >= end)
+            break;
+
+        r1 = ff_avc_find_startcode(r, end);
+        if ((state & 0x1f) == H264_NAL_SPS) {
+            ret = ff_avc_decode_sps(sps, r, r1 - r);
+            if (ret < 0) {
+                av_log(rtc, AV_LOG_ERROR, "WHIP: Failed to decode SPS, state=%x, size=%d\n",
+                    state, (int)(r1 - r));
+                return ret;
+            }
+
+            av_log(rtc, AV_LOG_INFO, "WHIP: Parse profile=%d, level=%d from SPS\n",
+                sps->profile_idc, sps->level_idc);
+            par->profile = sps->profile_idc;
+            par->level = sps->level_idc;
+        }
+
+        r = r1;
+    }
+
+    return ret;
+}
+
+/**
  * Parses video SPS/PPS from the extradata of codecpar and checks the codec.
  * Currently only supports video(h264) and audio(opus). Note that only baseline
  * and constrained baseline profiles of h264 are supported.
@@ -1109,7 +1162,7 @@ static av_cold int whip_init(AVFormatContext *s)
  */
 static int parse_codec(AVFormatContext *s)
 {
-    int i;
+    int i, ret = 0;
     RTCContext *rtc = s->priv_data;
 
     for (i = 0; i < s->nb_streams; i++) {
@@ -1132,6 +1185,20 @@ static int parse_codec(AVFormatContext *s)
             if (par->video_delay > 0) {
                 av_log(rtc, AV_LOG_ERROR, "WHIP: Unsupported B frames by RTC\n");
                 return AVERROR_PATCHWELCOME;
+            }
+
+            if ((ret = parse_profile_level(s, par)) < 0) {
+                av_log(rtc, AV_LOG_ERROR, "WHIP: Failed to parse SPS/PPS from extradata\n");
+                return AVERROR(EINVAL);
+            }
+
+            if (par->profile == FF_PROFILE_UNKNOWN) {
+                av_log(rtc, AV_LOG_WARNING, "WHIP: No profile found in extradata, consider baseline\n");
+                return AVERROR(EINVAL);
+            }
+            if (par->level == FF_LEVEL_UNKNOWN) {
+                av_log(rtc, AV_LOG_WARNING, "WHIP: No level found in extradata, consider 3.1\n");
+                return AVERROR(EINVAL);
             }
             break;
         case AVMEDIA_TYPE_AUDIO:
@@ -1165,7 +1232,7 @@ static int parse_codec(AVFormatContext *s)
         }
     }
 
-    return 0;
+    return ret;
 }
 
 /**
@@ -1246,8 +1313,8 @@ static int generate_sdp_offer(AVFormatContext *s)
     }
 
     if (rtc->video_par) {
-        profile_iop = profile = rtc->video_par->profile < 0 ? 0x42 : rtc->video_par->profile;
-        level = rtc->video_par->level < 0 ? 0x1e : rtc->video_par->level;
+        profile_iop = profile = rtc->video_par->profile;
+        level = rtc->video_par->level;
         if (rtc->video_par->codec_id == AV_CODEC_ID_H264) {
             vcodec_name = "H264";
             profile_iop &= FF_PROFILE_H264_CONSTRAINED;
@@ -2320,14 +2387,17 @@ static av_cold void rtc_deinit(AVFormatContext *s)
 
 static int rtc_check_bitstream(AVFormatContext *s, AVStream *st, const AVPacket *pkt)
 {
-    int ret = 1;
+    int ret = 1, extradata_isom = 0;
+    uint8_t *b = pkt->data;
+    RTCContext *rtc = s->priv_data;
 
     if (st->codecpar->codec_id == AV_CODEC_ID_H264) {
-        if (pkt->size >= 5 && AV_RB32(pkt->data) != 0x0000001 &&
-                             (AV_RB24(pkt->data) != 0x000001 ||
-                              (st->codecpar->extradata_size > 0 &&
-                               st->codecpar->extradata[0] == 1)))
+        extradata_isom = st->codecpar->extradata_size > 0 && st->codecpar->extradata[0] == 1;
+        if (pkt->size >= 5 && AV_RB32(b) != 0x0000001 && (AV_RB24(b) != 0x000001 || extradata_isom)) {
             ret = ff_stream_add_bitstream_filter(st, "h264_mp4toannexb", NULL);
+            av_log(rtc, AV_LOG_INFO, "WHIP: Enable BSF h264_mp4toannexb, packet=[%x %x %x %x %x ...], extradata_isom=%d\n",
+                b[0], b[1], b[2], b[3], b[4], extradata_isom);
+        }
     }
 
     return ret;
