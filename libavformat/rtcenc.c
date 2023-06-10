@@ -1096,14 +1096,16 @@ static av_cold int whip_init(AVFormatContext *s)
 }
 
 /**
+ * When duplicating a stream, the demuxer has already set the extradata, profile, and
+ * level of the par. Keep in mind that this function will not be invoked since the
+ * profile and level are set.
+ *
  * When utilizing an encoder, such as libx264, to encode a stream, the extradata in
  * par->extradata contains the SPS, which includes profile and level information.
  * However, the profile and level of par remain unspecified. Therefore, it is necessary
  * to extract the profile and level data from the extradata and assign it to the par's
- * profile and level.
- *
- * When copying a stream, the extradata, as well as the profile and level of the par,
- * are already set by demuxer.
+ * profile and level. Keep in mind that AVFMT_GLOBALHEADER must be enabled; otherwise,
+ * the extradata will remain empty.
  */
 static int parse_profile_level(AVFormatContext *s, AVCodecParameters *par)
 {
@@ -1120,9 +1122,9 @@ static int parse_profile_level(AVFormatContext *s, AVCodecParameters *par)
         return ret;
 
     if (!par->extradata || par->extradata_size <= 0) {
-        par->profile = FF_PROFILE_H264_BASELINE;
-        par->level = 0x1e;
-        return ret;
+        av_log(rtc, AV_LOG_ERROR, "WHIP: Unable to parse profile from empty extradata=%p, size=%d\n",
+            par->extradata, par->extradata_size);
+        return AVERROR(EINVAL);
     }
 
     while (1) {
@@ -2526,7 +2528,7 @@ const FFOutputFormat ff_rtc_muxer = {
     .p.long_name        = NULL_IF_CONFIG_SMALL("WHIP(WebRTC-HTTP ingestion protocol) muxer"),
     .p.audio_codec      = AV_CODEC_ID_OPUS,
     .p.video_codec      = AV_CODEC_ID_H264,
-    .p.flags            = AVFMT_NOFILE | AVFMT_GLOBALHEADER,
+    .p.flags            = AVFMT_GLOBALHEADER | AVFMT_NOFILE,
     .p.priv_class       = &rtc_muxer_class,
     .priv_data_size     = sizeof(RTCContext),
     .init               = rtc_init,
