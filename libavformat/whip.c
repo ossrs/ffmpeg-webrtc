@@ -2476,6 +2476,12 @@ static av_cold void whip_deinit(AVFormatContext *s)
             continue;
 
         av_write_trailer(rtp_ctx);
+        /**
+         * Keep in mind that it is necessary to free the buffer of pb since we allocate
+         * it and pass it to pb using avio_alloc_context, while avio_context_free does
+         * not perform this action.
+         */
+        av_freep(&rtp_ctx->pb->buffer);
         avio_context_free(&rtp_ctx->pb);
         avformat_free_context(rtp_ctx);
         s->streams[i]->priv_data = NULL;
