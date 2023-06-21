@@ -1409,15 +1409,11 @@ static int exchange_sdp(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     /* The URL context is an HTTP transport layer for the WHIP protocol. */
     URLContext *whip_uc = NULL;
+    AVDictionary *opts = NULL;
+    char *hex_data = NULL;
 
     /* To prevent a crash during cleanup, always initialize it. */
     av_bprint_init(&bp, 1, MAX_SDP_SIZE);
-
-    ret = ffurl_alloc(&whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
-    if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to alloc HTTP context: %s\n", s->url);
-        goto end;
-    }
 
     if (!whip->sdp_offer || !strlen(whip->sdp_offer)) {
         av_log(whip, AV_LOG_ERROR, "WHIP: No offer to exchange\n");
@@ -1425,9 +1421,7 @@ static int exchange_sdp(AVFormatContext *s)
         goto end;
     }
 
-    ret = snprintf(buf, sizeof(buf),
-             "Cache-Control: no-cache\r\n"
-             "Content-Type: application/sdp\r\n");
+    ret = snprintf(buf, sizeof(buf), "Cache-Control: no-cache\r\nContent-Type: application/sdp\r\n");
     if (whip->authorization)
         ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", whip->authorization);
     if (ret <= 0 || ret >= sizeof(buf)) {
@@ -1436,11 +1430,15 @@ static int exchange_sdp(AVFormatContext *s)
         goto end;
     }
 
-    av_opt_set(whip_uc->priv_data, "headers", buf, 0);
-    av_opt_set(whip_uc->priv_data, "chunked_post", "0", 0);
-    av_opt_set_bin(whip_uc->priv_data, "post_data", whip->sdp_offer, (int)strlen(whip->sdp_offer), 0);
+    av_dict_set(&opts, "headers", buf, 0);
+    av_dict_set_int(&opts, "chunked_post", 0, 0);
 
-    ret = ffurl_connect(whip_uc, NULL);
+    hex_data = av_mallocz(2 * strlen(whip->sdp_offer) + 1);
+    ff_data_to_hex(hex_data, whip->sdp_offer, strlen(whip->sdp_offer), 0);
+    av_dict_set(&opts, "post_data", hex_data, 0);
+
+    ret = ffurl_open_whitelist(&whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
+        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to request url=%s, offer: %s\n", s->url, whip->sdp_offer);
         goto end;
@@ -1494,6 +1492,8 @@ static int exchange_sdp(AVFormatContext *s)
 end:
     ffurl_closep(&whip_uc);
     av_bprint_finalize(&bp, NULL);
+    av_dict_free(&opts);
+    av_freep(&hex_data);
     return ret;
 }
 
@@ -1848,27 +1848,23 @@ static int ice_handle_binding_request(AVFormatContext *s, char *buf, int buf_siz
 static int udp_connect(AVFormatContext *s)
 {
     int ret = 0;
-    char url[256], tmp[16];
+    char url[256];
+    AVDictionary *opts = NULL;
     WHIPContext *whip = s->priv_data;
 
     /* Build UDP URL and create the UDP context as transport. */
     ff_url_join(url, sizeof(url), "udp", NULL, whip->ice_host, whip->ice_port, NULL);
-    ret = ffurl_alloc(&whip->udp_uc, url, AVIO_FLAG_WRITE, &s->interrupt_callback);
-    if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to open udp://%s:%d\n", whip->ice_host, whip->ice_port);
-        return ret;
-    }
 
-    av_opt_set(whip->udp_uc->priv_data, "connect", "1", 0);
-    av_opt_set(whip->udp_uc->priv_data, "fifo_size", "0", 0);
+    av_dict_set_int(&opts, "connect", 1, 0);
+    av_dict_set_int(&opts, "fifo_size", 0, 0);
     /* Set the max packet size to the buffer size. */
-    snprintf(tmp, sizeof(tmp), "%d", whip->pkt_size);
-    av_opt_set(whip->udp_uc->priv_data, "pkt_size", tmp, 0);
+    av_dict_set_int(&opts, "pkt_size", whip->pkt_size, 0);
 
-    ret = ffurl_connect(whip->udp_uc, NULL);
+    ret = ffurl_open_whitelist(&whip->udp_uc, url, AVIO_FLAG_WRITE, &s->interrupt_callback,
+        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to connect udp://%s:%d\n", whip->ice_host, whip->ice_port);
-        return ret;
+        goto end;
     }
 
     /* Make the socket non-blocking, set to READ and WRITE mode after connected */
@@ -1881,6 +1877,8 @@ static int udp_connect(AVFormatContext *s)
     av_log(whip, AV_LOG_VERBOSE, "WHIP: UDP state=%d, elapsed=%dms, connected to udp://%s:%d\n",
         whip->state, ELAPSED(whip->whip_starttime, av_gettime()), whip->ice_host, whip->ice_port);
 
+end:
+    av_dict_free(&opts);
     return ret;
 }
 
@@ -2247,20 +2245,16 @@ static int dispose_session(AVFormatContext *s)
     int ret;
     char buf[MAX_URL_SIZE];
     URLContext *whip_uc = NULL;
+    AVDictionary *opts = NULL;
     WHIPContext *whip = s->priv_data;
 
     if (!whip->whip_resource_url)
         return 0;
 
-    ret = ffurl_alloc(&whip_uc, whip->whip_resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback);
-    if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to alloc WHIP delete context: %s\n", s->url);
-        goto end;
-    }
-
-    av_opt_set(whip_uc->priv_data, "chunked_post", "0", 0);
-    av_opt_set(whip_uc->priv_data, "method", "DELETE", 0);
-    ret = ffurl_connect(whip_uc, NULL);
+    av_dict_set_int(&opts, "chunked_post", 0, 0);
+    av_dict_set(&opts, "method", "DELETE", 0);
+    ret = ffurl_open_whitelist(&whip_uc, whip->whip_resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
+        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to DELETE url=%s\n", whip->whip_resource_url);
         goto end;
@@ -2282,6 +2276,7 @@ static int dispose_session(AVFormatContext *s)
 
 end:
     ffurl_closep(&whip_uc);
+    av_dict_free(&opts);
     return ret;
 }
 
