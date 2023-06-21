@@ -2251,6 +2251,16 @@ static int dispose_session(AVFormatContext *s)
     if (!whip->whip_resource_url)
         return 0;
 
+    ret = snprintf(buf, sizeof(buf), "Cache-Control: no-cache\r\n");
+    if (whip->authorization)
+        ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", whip->authorization);
+    if (ret <= 0 || ret >= sizeof(buf)) {
+        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to generate headers, size=%d, %s\n", ret, buf);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    av_dict_set(&opts, "headers", buf, 0);
     av_dict_set_int(&opts, "chunked_post", 0, 0);
     av_dict_set(&opts, "method", "DELETE", 0);
     ret = ffurl_open_whitelist(&whip_uc, whip->whip_resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
