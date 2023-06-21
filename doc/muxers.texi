@@ -2879,6 +2879,12 @@ Default value is 1500.
 @item authorization @var{string}
 The optional Bearer token for WHIP Authorization.
 
+@item cert_file @var{string}
+The optional certificate file path for DTLS.
+
+@item key_file @var{string}
+The optional private key file path for DTLS.
+
 @end table
 
 @c man end MUXERS

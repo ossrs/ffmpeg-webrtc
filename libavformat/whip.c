@@ -232,6 +232,9 @@ typedef struct DTLSContext {
     int error_code;
     char error_message[256];
 
+    /* The certificate and private key used for DTLS handshake. */
+    char* cert_file;
+    char* key_file;
     /**
      * The size of RTP packet, should generally be set to MTU.
      * Note that pion requires a smaller value, for example, 1200.
@@ -419,6 +422,45 @@ static long openssl_dtls_bio_out_callback_ex(BIO *b, int oper, const char *argp,
     }
 
     return retvalue;
+}
+
+static int openssl_read_certificate(DTLSContext *ctx)
+{
+    int ret = 0;
+    FILE *fp_key = NULL, *fp_cert = NULL;
+
+    fp_key = fopen(ctx->key_file, "r");
+    if (!fp_key) {
+        av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to open key file %s\n", ctx->key_file);
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    ctx->dtls_pkey = PEM_read_PrivateKey(fp_key, NULL, NULL, NULL);
+    if (!ctx->dtls_pkey) {
+        av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to read private key from %s\n", ctx->key_file);
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    fp_cert = fopen(ctx->cert_file, "r");
+    if (!fp_cert) {
+        av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to open certificate file %s\n", ctx->cert_file);
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    ctx->dtls_cert = PEM_read_X509(fp_cert, NULL, NULL, NULL);
+    if (!ctx->dtls_cert) {
+        av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to read certificate from %s\n", ctx->cert_file);
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+end:
+    if (fp_key) fclose(fp_key);
+    if (fp_cert) fclose(fp_cert);
+    return ret;
 }
 
 static int openssl_dtls_gen_private_key(DTLSContext *ctx)
@@ -635,7 +677,8 @@ static av_cold int openssl_dtls_init_context(DTLSContext *ctx)
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L // v1.1.x
 #if OPENSSL_VERSION_NUMBER < 0x10002000L // v1.0.2
-    SSL_CTX_set_tmp_ecdh(dtls_ctx, ctx->dtls_eckey);
+    if (ctx->dtls_eckey)
+        SSL_CTX_set_tmp_ecdh(dtls_ctx, ctx->dtls_eckey);
 #else
     SSL_CTX_set_ecdh_auto(dtls_ctx, 1);
 #endif
@@ -741,16 +784,25 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
 
     ctx->dtls_init_starttime = av_gettime();
 
-    /* Generate a private key to ctx->dtls_pkey. */
-    if ((ret = openssl_dtls_gen_private_key(ctx)) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to generate DTLS private key\n");
-        return ret;
-    }
+    if (ctx->cert_file && ctx->key_file) {
+        /* Read the private key and file from the file. */
+        if ((ret = openssl_read_certificate(ctx)) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to read DTLS certificate from cert=%s, key=%s\n",
+                ctx->cert_file, ctx->key_file);
+            return ret;
+        }
+    } else {
+        /* Generate a private key to ctx->dtls_pkey. */
+        if ((ret = openssl_dtls_gen_private_key(ctx)) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to generate DTLS private key\n");
+            return ret;
+        }
 
-    /* Generate a self-signed certificate. */
-    if ((ret = openssl_dtls_gen_certificate(ctx)) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to generate DTLS certificate\n");
-        return ret;
+        /* Generate a self-signed certificate. */
+        if ((ret = openssl_dtls_gen_certificate(ctx)) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to generate DTLS certificate\n");
+            return ret;
+        }
     }
 
     if ((ret = openssl_dtls_init_context(ctx)) < 0) {
@@ -881,6 +933,8 @@ static av_cold void dtls_context_deinit(DTLSContext *ctx)
     X509_free(ctx->dtls_cert);
     EVP_PKEY_free(ctx->dtls_pkey);
     av_freep(&ctx->dtls_fingerprint);
+    av_freep(&ctx->cert_file);
+    av_freep(&ctx->key_file);
 #if OPENSSL_VERSION_NUMBER < 0x30000000L /* OpenSSL 3.0 */
     EC_KEY_free(ctx->dtls_eckey);
 #endif
@@ -1009,6 +1063,9 @@ typedef struct WHIPContext {
      * See https://www.ietf.org/archive/id/draft-ietf-wish-whip-08.html#name-authentication-and-authoriz
      */
     char* authorization;
+    /* The certificate and private key used for DTLS handshake. */
+    char* cert_file;
+    char* key_file;
 } WHIPContext;
 
 /**
@@ -1085,6 +1142,10 @@ static av_cold int initialize(AVFormatContext *s)
     whip->dtls_ctx.opaque = s;
     whip->dtls_ctx.on_state = dtls_context_on_state;
     whip->dtls_ctx.on_write = dtls_context_on_write;
+    if (whip->cert_file)
+        whip->dtls_ctx.cert_file = av_strdup(whip->cert_file);
+    if (whip->key_file)
+        whip->dtls_ctx.key_file = av_strdup(whip->key_file);
 
     if ((ret = dtls_context_init(&whip->dtls_ctx)) < 0) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to init DTLS context\n");
@@ -1434,6 +1495,10 @@ static int exchange_sdp(AVFormatContext *s)
     av_dict_set_int(&opts, "chunked_post", 0, 0);
 
     hex_data = av_mallocz(2 * strlen(whip->sdp_offer) + 1);
+    if (!hex_data) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
     ff_data_to_hex(hex_data, whip->sdp_offer, strlen(whip->sdp_offer), 0);
     av_dict_set(&opts, "post_data", hex_data, 0);
 
@@ -2500,6 +2565,8 @@ static av_cold void whip_deinit(AVFormatContext *s)
     av_freep(&whip->ice_protocol);
     av_freep(&whip->ice_host);
     av_freep(&whip->authorization);
+    av_freep(&whip->cert_file);
+    av_freep(&whip->key_file);
     ffurl_closep(&whip->udp_uc);
     ff_srtp_free(&whip->srtp_audio_send);
     ff_srtp_free(&whip->srtp_video_send);
@@ -2530,9 +2597,11 @@ static int whip_check_bitstream(AVFormatContext *s, AVStream *st, const AVPacket
 #define OFFSET(x) offsetof(WHIPContext, x)
 #define DEC AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
-    { "handshake_timeout",  "Timeout in milliseconds for ICE and DTLS handshake.",              OFFSET(handshake_timeout),  AV_OPT_TYPE_INT,    { .i64 = 5000 },    -1, INT_MAX, DEC },
-    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out",         OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, DEC },
-    { "authorization",      "The optional Bearer token for WHIP Authorization",                 OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
+    { "handshake_timeout",  "Timeout in milliseconds for ICE and DTLS handshake.",      OFFSET(handshake_timeout),  AV_OPT_TYPE_INT,    { .i64 = 5000 },    -1, INT_MAX, DEC },
+    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, DEC },
+    { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
+    { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
+    { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
     { NULL },
 };
 
