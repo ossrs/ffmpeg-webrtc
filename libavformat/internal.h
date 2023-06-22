@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 
+#include "libavcodec/codec_desc.h"
 #include "libavcodec/packet_internal.h"
 
 #include "avformat.h"
@@ -408,6 +409,8 @@ typedef struct FFStream {
      */
     int64_t first_dts;
     int64_t cur_dts;
+
+    const AVCodecDescriptor *codec_desc;
 } FFStream;
 
 static av_always_inline FFStream *ffstream(AVStream *st)
@@ -704,6 +707,15 @@ int ff_unlock_avformat(void);
  * set the legacy filename field to the same string which was provided in url.
  */
 void ff_format_set_url(AVFormatContext *s, char *url);
+
+/**
+ * Return a positive value if the given url has one of the given
+ * extensions, negative AVERROR on error, 0 otherwise.
+ *
+ * @param url        url to check against the given extensions
+ * @param extensions a comma-separated list of filename extensions
+ */
+int ff_match_url_ext(const char *url, const char *extensions);
 
 struct FFOutputFormat;
 void avpriv_register_devices(const struct FFOutputFormat * const o[], const AVInputFormat * const i[]);

@@ -236,6 +236,7 @@ External library support:
   --enable-libfontconfig   enable libfontconfig, useful for drawtext filter [no]
   --enable-libfreetype     enable libfreetype, needed for drawtext filter [no]
   --enable-libfribidi      enable libfribidi, improves drawtext filter [no]
+  --enable-libharfbuzz     enable libharfbuzz, needed for drawtext filter [no]
   --enable-libglslang      enable GLSL->SPIRV compilation via libglslang [no]
   --enable-libgme          enable Game Music Emu via libgme [no]
   --enable-libgsm          enable GSM de/encoding via libgsm [no]
@@ -327,7 +328,6 @@ External library support:
   --disable-securetransport disable Secure Transport, needed for TLS support
                            on OSX if openssl and gnutls are not used [autodetect]
   --enable-vapoursynth     enable VapourSynth demuxer [no]
-  --disable-vulkan         disable Vulkan code [autodetect]
   --disable-xlib           disable xlib [autodetect]
   --disable-zlib           disable zlib [autodetect]
 
@@ -354,6 +354,7 @@ External library support:
   --disable-vaapi          disable Video Acceleration API (mainly Unix/Intel) code [autodetect]
   --disable-vdpau          disable Nvidia Video Decode and Presentation API for Unix code [autodetect]
   --disable-videotoolbox   disable VideoToolbox code [autodetect]
+  --disable-vulkan         disable Vulkan code [autodetect]
 
 Toolchain options:
   --arch=ARCH              select architecture [$arch]
@@ -454,6 +455,8 @@ Optimization options (experts only):
   --disable-armv6t2        disable armv6t2 optimizations
   --disable-vfp            disable VFP optimizations
   --disable-neon           disable NEON optimizations
+  --disable-dotprod        disable DOTPROD optimizations
+  --disable-i8mm           disable I8MM optimizations
   --disable-inline-asm     disable use of inline assembly
   --disable-x86asm         disable use of standalone x86 assembly
   --disable-mipsdsp        disable MIPS DSP ASE R1 optimizations
@@ -1154,6 +1157,43 @@ check_insn(){
     check_as ${1}_external "$2"
 }
 
+check_arch_level(){
+    log check_arch_level "$@"
+    level="$1"
+    check_as tested_arch_level ".arch $level"
+    enabled tested_arch_level && as_arch_level="$level"
+}
+
+check_archext_insn(){
+    log check_archext_insn "$@"
+    feature="$1"
+    instr="$2"
+    # Check if the assembly is accepted in inline assembly.
+    check_inline_asm ${feature}_inline "\"$instr\""
+    # We don't check if the instruction is supported out of the box by the
+    # external assembler (we don't try to set ${feature}_external) as we don't
+    # need to use these instructions in non-runtime detected codepaths.
+
+    disable $feature
+
+    enabled as_arch_directive && arch_directive=".arch $as_arch_level" || arch_directive=""
+
+    # Test if the assembler supports the .arch_extension $feature directive.
+    arch_extension_directive=".arch_extension $feature"
+    test_as <<EOF && enable as_archext_${feature}_directive || arch_extension_directive=""
+$arch_directive
+$arch_extension_directive
+EOF
+
+    # Test if we can assemble the instruction after potential .arch and
+    # .arch_extension directives.
+    test_as <<EOF && enable ${feature}
+$arch_directive
+$arch_extension_directive
+$instr
+EOF
+}
+
 check_x86asm(){
     log check_x86asm "$@"
     name=$1
@@ -1820,6 +1860,7 @@ EXTERNAL_LIBRARY_LIST="
     libfontconfig
     libfreetype
     libfribidi
+    libharfbuzz
     libglslang
     libgme
     libgsm
@@ -2059,6 +2100,8 @@ ARCH_EXT_LIST_ARM="
     armv6
     armv6t2
     armv8
+    dotprod
+    i8mm
     neon
     vfp
     vfpv3
@@ -2168,6 +2211,7 @@ HAVE_LIST_PUB="
 
 HEADERS_LIST="
     arpa_inet_h
+    asm_hwcap_h
     asm_types_h
     cdio_paranoia_h
     cdio_paranoia_paranoia_h
@@ -2306,6 +2350,7 @@ SYSTEM_FUNCS="
     strerror_r
     sysconf
     sysctl
+    sysctlbyname
     usleep
     UTGetOSTypeFromString
     VirtualAlloc
@@ -2322,6 +2367,8 @@ SYSTEM_LIBRARIES="
 
 TOOLCHAIN_FEATURES="
     as_arch_directive
+    as_archext_dotprod_directive
+    as_archext_i8mm_directive
     as_dn_directive
     as_fpu_directive
     as_func
@@ -2438,6 +2485,7 @@ CONFIG_EXTRA="
     dnn
     dovi_rpu
     dvprofile
+    evcparse
     exif
     faandct
     faanidct
@@ -2622,6 +2670,8 @@ intrinsics_neon_deps="neon"
 vfp_deps_any="aarch64 arm"
 vfpv3_deps="vfp"
 setend_deps="arm"
+dotprod_deps="aarch64 neon"
+i8mm_deps="aarch64 neon"
 
 map 'eval ${v}_inline_deps=inline_asm' $ARCH_EXT_LIST_ARM
 
@@ -2721,6 +2771,7 @@ dovi_rpu_select="golomb"
 dnn_suggest="libtensorflow libopenvino"
 dnn_deps="avformat swscale"
 error_resilience_select="me_cmp"
+evcparse_select="golomb"
 faandct_deps="faan"
 faandct_select="fdctdsp"
 faanidct_deps="faan"
@@ -2776,7 +2827,7 @@ asv1_encoder_select="aandcttables bswapdsp fdctdsp pixblockdsp"
 asv2_decoder_select="blockdsp bswapdsp idctdsp"
 asv2_encoder_select="aandcttables bswapdsp fdctdsp pixblockdsp"
 atrac1_decoder_select="sinewin"
-av1_decoder_select="av1_frame_split_bsf cbs_av1 atsc_a53"
+av1_decoder_select="cbs_av1 atsc_a53"
 bink_decoder_select="blockdsp hpeldsp"
 binkaudio_dct_decoder_select="wma_freqs"
 binkaudio_rdft_decoder_select="wma_freqs"
@@ -2915,6 +2966,7 @@ ralf_decoder_select="golomb"
 rasc_decoder_select="inflate_wrapper"
 rawvideo_decoder_select="bswapdsp"
 rscc_decoder_deps="zlib"
+rtv1_decoder_select="texturedsp"
 rv10_decoder_select="h263_decoder"
 rv10_encoder_select="h263_encoder"
 rv20_decoder_select="h263_decoder"
@@ -2958,6 +3010,7 @@ utvideo_encoder_select="bswapdsp huffman llvidencdsp"
 vble_decoder_select="llviddsp"
 vbn_decoder_select="texturedsp"
 vbn_encoder_select="texturedspenc"
+vmix_decoder_select="idctdsp"
 vc1_decoder_select="blockdsp h264qpel intrax8 mpegvideodec qpeldsp vc1dsp"
 vc1image_decoder_select="vc1_decoder"
 vorbis_encoder_select="audio_frame_queue"
@@ -3020,6 +3073,8 @@ av1_vaapi_hwaccel_deps="vaapi VADecPictureParameterBufferAV1_bit_depth_idx"
 av1_vaapi_hwaccel_select="av1_decoder"
 av1_vdpau_hwaccel_deps="vdpau VdpPictureInfoAV1"
 av1_vdpau_hwaccel_select="av1_decoder"
+av1_vulkan_hwaccel_deps="vulkan"
+av1_vulkan_hwaccel_select="av1_decoder"
 h263_vaapi_hwaccel_deps="vaapi"
 h263_vaapi_hwaccel_select="h263_decoder"
 h263_videotoolbox_hwaccel_deps="videotoolbox"
@@ -3038,6 +3093,8 @@ h264_vdpau_hwaccel_deps="vdpau"
 h264_vdpau_hwaccel_select="h264_decoder"
 h264_videotoolbox_hwaccel_deps="videotoolbox"
 h264_videotoolbox_hwaccel_select="h264_decoder"
+h264_vulkan_hwaccel_deps="vulkan"
+h264_vulkan_hwaccel_select="h264_decoder"
 hevc_d3d11va_hwaccel_deps="d3d11va DXVA_PicParams_HEVC"
 hevc_d3d11va_hwaccel_select="hevc_decoder"
 hevc_d3d11va2_hwaccel_deps="d3d11va DXVA_PicParams_HEVC"
@@ -3052,6 +3109,8 @@ hevc_vdpau_hwaccel_deps="vdpau VdpPictureInfoHEVC"
 hevc_vdpau_hwaccel_select="hevc_decoder"
 hevc_videotoolbox_hwaccel_deps="videotoolbox"
 hevc_videotoolbox_hwaccel_select="hevc_decoder"
+hevc_vulkan_hwaccel_deps="vulkan"
+hevc_vulkan_hwaccel_select="hevc_decoder"
 mjpeg_nvdec_hwaccel_deps="nvdec"
 mjpeg_nvdec_hwaccel_select="mjpeg_decoder"
 mjpeg_vaapi_hwaccel_deps="vaapi"
@@ -3162,6 +3221,7 @@ aac_mf_encoder_deps="mediafoundation"
 ac3_mf_encoder_deps="mediafoundation"
 av1_cuvid_decoder_deps="cuvid CUVIDAV1PICPARAMS"
 av1_mediacodec_decoder_deps="mediacodec"
+av1_mediacodec_encoder_deps="mediacodec"
 av1_nvenc_encoder_deps="nvenc NV_ENC_PIC_PARAMS_AV1"
 av1_nvenc_encoder_select="atsc_a53"
 h263_v4l2m2m_decoder_deps="v4l2_m2m h263_v4l2_m2m"
@@ -3239,6 +3299,7 @@ vc1_qsv_decoder_select="qsvdec"
 vc1_v4l2m2m_decoder_deps="v4l2_m2m vc1_v4l2_m2m"
 vp8_cuvid_decoder_deps="cuvid"
 vp8_mediacodec_decoder_deps="mediacodec"
+vp8_mediacodec_encoder_deps="mediacodec"
 vp8_qsv_decoder_select="qsvdec"
 vp8_rkmpp_decoder_deps="rkmpp"
 vp8_vaapi_encoder_deps="VAEncPictureParameterBufferVP8"
@@ -3264,6 +3325,7 @@ av1_amf_encoder_deps="amf"
 # parsers
 aac_parser_select="adts_header mpeg4audio"
 av1_parser_select="cbs_av1"
+evc_parser_select="evcparse"
 h264_parser_select="golomb h264dsp h264parse h264_sei"
 hevc_parser_select="hevcparse hevc_sei"
 mpegaudio_parser_select="mpegaudioheader"
@@ -3277,6 +3339,7 @@ av1_frame_split_bsf_select="cbs_av1"
 av1_metadata_bsf_select="cbs_av1"
 dts2pts_bsf_select="cbs_h264 h264parse"
 eac3_core_bsf_select="ac3_parser"
+evc_frame_merge_bsf_select="evcparse"
 filter_units_bsf_select="cbs"
 h264_metadata_bsf_deps="const_nan"
 h264_metadata_bsf_select="cbs_h264"
@@ -3431,6 +3494,7 @@ dv_demuxer_select="dvprofile"
 dv_muxer_select="dvprofile"
 dxa_demuxer_select="riffdec"
 eac3_demuxer_select="ac3_parser"
+evc_demuxer_select="evc_frame_merge_bsf evc_parser"
 f4v_muxer_select="mov_muxer"
 fifo_muxer_deps="threads"
 flac_demuxer_select="flac_parser"
@@ -3640,7 +3704,11 @@ blend_vulkan_filter_deps="vulkan spirv_compiler"
 boxblur_filter_deps="gpl"
 boxblur_opencl_filter_deps="opencl gpl"
 bs2b_filter_deps="libbs2b"
+bwdif_cuda_filter_deps="ffnvcodec"
+bwdif_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+bwdif_vulkan_filter_deps="vulkan spirv_compiler"
 chromaber_vulkan_filter_deps="vulkan spirv_compiler"
+color_vulkan_filter_deps="vulkan spirv_compiler"
 colorkey_opencl_filter_deps="opencl"
 colormatrix_filter_deps="gpl"
 convolution_opencl_filter_deps="opencl"
@@ -3662,7 +3730,7 @@ dilation_opencl_filter_deps="opencl"
 dnn_classify_filter_select="dnn"
 dnn_detect_filter_select="dnn"
 dnn_processing_filter_select="dnn"
-drawtext_filter_deps="libfreetype"
+drawtext_filter_deps="libfreetype libharfbuzz"
 drawtext_filter_suggest="libfontconfig libfribidi"
 elbg_filter_deps="avcodec"
 eq_filter_deps="gpl"
@@ -3697,6 +3765,7 @@ minterpolate_filter_select="scene_sad"
 mptestsrc_filter_deps="gpl"
 negate_filter_deps="lut_filter"
 nlmeans_opencl_filter_deps="opencl"
+nlmeans_vulkan_filter_deps="vulkan spirv_compiler"
 nnedi_filter_deps="gpl"
 ocr_filter_deps="libtesseract"
 ocv_filter_deps="libopencv"
@@ -3768,6 +3837,7 @@ scale_vulkan_filter_deps="vulkan spirv_compiler"
 vpp_qsv_filter_deps="libmfx"
 vpp_qsv_filter_select="qsvvpp"
 xfade_opencl_filter_deps="opencl"
+xfade_vulkan_filter_deps="vulkan spirv_compiler"
 yadif_cuda_filter_deps="ffnvcodec"
 yadif_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
 yadif_videotoolbox_filter_deps="metal corevideo videotoolbox"
@@ -5979,12 +6049,27 @@ check_inline_asm inline_asm_labels '"1:\n"'
 check_inline_asm inline_asm_nonlocal_labels '"Label:\n"'
 
 if enabled aarch64; then
+    as_arch_level="armv8-a"
+    check_as as_arch_directive ".arch $as_arch_level"
+    enabled as_arch_directive && check_arch_level armv8.2-a
+
     enabled armv8 && check_insn armv8 'prfm   pldl1strm, [x0]'
     # internal assembler in clang 3.3 does not support this instruction
     enabled neon && check_insn neon 'ext   v0.8B, v0.8B, v1.8B, #1'
     enabled vfp  && check_insn vfp  'fmadd d0,    d0,    d1,    d2'
 
-    map 'enabled_any ${v}_external ${v}_inline || disable $v' $ARCH_EXT_LIST_ARM
+    archext_list="dotprod i8mm"
+    enabled dotprod && check_archext_insn dotprod 'udot v0.4s, v0.16b, v0.16b'
+    enabled i8mm    && check_archext_insn i8mm    'usdot v0.4s, v0.16b, v0.16b'
+
+    # Disable the main feature (e.g. HAVE_NEON) if neither inline nor external
+    # assembly support the feature out of the box. Skip this for the features
+    # checked with check_archext_insn above, as that function takes care of
+    # updating all the variables as necessary.
+    for v in $ARCH_EXT_LIST_ARM; do
+        is_in $v $archext_list && continue
+        enabled_any ${v}_external ${v}_inline || disable $v
+    done
 
 elif enabled alpha; then
 
@@ -6013,6 +6098,12 @@ EOF
         warn "Compiler does not indicate floating-point ABI, guessing $fpabi."
     fi
 
+    # Test for various instruction sets, testing support both in inline and
+    # external assembly. This sets the ${v}_inline or ${v}_external flags
+    # if the instruction can be used unconditionally in either inline or
+    # external assembly. This means that if the ${v}_external feature is set,
+    # that feature can be used unconditionally in various support macros
+    # anywhere in external assembly, in any function.
     enabled armv5te && check_insn armv5te 'qadd r0, r0, r0'
     enabled armv6   && check_insn armv6   'sadd16 r0, r0, r0'
     enabled armv6t2 && check_insn armv6t2 'movt r0, #0'
@@ -6021,6 +6112,14 @@ EOF
     enabled vfpv3   && check_insn vfpv3   'vmov.f32 s0, #1.0'
     enabled setend  && check_insn setend  'setend be'
 
+    # If neither inline nor external assembly can use the feature by default,
+    # disable the main unsuffixed feature (e.g. HAVE_NEON).
+    #
+    # For targets that support runtime CPU feature detection, don't disable
+    # the main feature flag - there we assume that all supported toolchains
+    # can assemble code for all instruction set features (e.g. NEON) with
+    # suitable assembly flags (such as ".fpu neon"); we don't check
+    # specifically that they really do.
     [ $target_os = linux ] || [ $target_os = android ] ||
         map 'enabled_any ${v}_external ${v}_inline || disable $v' \
             $ARCH_EXT_LIST_ARM
@@ -6310,6 +6409,7 @@ check_func_headers mach/mach_time.h mach_absolute_time
 check_func_headers stdlib.h getenv
 check_func_headers sys/stat.h lstat
 check_func_headers sys/auxv.h getauxval
+check_func_headers sys/sysctl.h sysctlbyname
 
 check_func_headers windows.h GetModuleHandle
 check_func_headers windows.h GetProcessAffinityMask
@@ -6349,6 +6449,7 @@ check_headers io.h
 enabled libdrm &&
     check_headers linux/dma-buf.h
 
+check_headers asm/hwcap.h
 check_headers linux/perf_event.h
 check_headers libcrystalhd/libcrystalhd_if.h
 check_headers malloc.h
@@ -6596,6 +6697,7 @@ enabled fontconfig        && enable libfontconfig
 enabled libfontconfig     && require_pkg_config libfontconfig fontconfig "fontconfig/fontconfig.h" FcInit
 enabled libfreetype       && require_pkg_config libfreetype freetype2 "ft2build.h FT_FREETYPE_H" FT_Init_FreeType
 enabled libfribidi        && require_pkg_config libfribidi fribidi fribidi.h fribidi_version_info
+enabled libharfbuzz       && require_pkg_config libharfbuzz harfbuzz hb.h hb_buffer_create
 enabled libglslang && { check_lib spirv_compiler glslang/Include/glslang_c_interface.h glslang_initialize_process \
                             -lglslang -lMachineIndependent -lOSDependent -lHLSL -lOGLCompiler -lGenericCodeGen \
                             -lSPVRemapper -lSPIRV -lSPIRV-Tools-opt -lSPIRV-Tools -lpthread -lstdc++ -lm ||
@@ -6663,7 +6765,8 @@ enabled libopenh264       && require_pkg_config libopenh264 openh264 wels/codec_
 enabled libopenjpeg       && { check_pkg_config libopenjpeg "libopenjp2 >= 2.1.0" openjpeg.h opj_version ||
                                { require_pkg_config libopenjpeg "libopenjp2 >= 2.1.0" openjpeg.h opj_version -DOPJ_STATIC && add_cppflags -DOPJ_STATIC; } }
 enabled libopenmpt        && require_pkg_config libopenmpt "libopenmpt >= 0.2.6557" libopenmpt/libopenmpt.h openmpt_module_create -lstdc++ && append libopenmpt_extralibs "-lstdc++"
-enabled libopenvino       && require libopenvino c_api/ie_c_api.h ie_c_api_version -linference_engine_c_api
+enabled libopenvino       && { check_pkg_config libopenvino openvino c_api/ie_c_api.h ie_c_api_version ||
+                               require libopenvino c_api/ie_c_api.h ie_c_api_version -linference_engine_c_api; }
 enabled libopus           && {
     enabled libopus_decoder && {
         require_pkg_config libopus opus opus_multistream.h opus_multistream_decoder_create
@@ -7048,8 +7151,8 @@ enabled crystalhd && check_lib crystalhd "stdint.h libcrystalhd/libcrystalhd_if.
          "in maintaining it."
 
 if enabled vulkan; then
-    check_pkg_config_header_only vulkan "vulkan >= 1.2.189" "vulkan/vulkan.h" "defined VK_VERSION_1_2" ||
-        check_cpp_condition vulkan "vulkan/vulkan.h" "defined(VK_VERSION_1_3) || (defined(VK_VERSION_1_2) && VK_HEADER_VERSION >= 189)"
+    check_pkg_config_header_only vulkan "vulkan >= 1.3.238" "vulkan/vulkan.h" "defined VK_VERSION_1_3" ||
+        check_cpp_condition vulkan "vulkan/vulkan.h" "defined(VK_VERSION_1_4) || (defined(VK_VERSION_1_3) && VK_HEADER_VERSION >= 238)"
 fi
 
 if enabled x86; then
@@ -7078,7 +7181,7 @@ enabled nvenc &&
     test_cc -I$source_path <<EOF || disable nvenc
 #include <ffnvcodec/nvEncodeAPI.h>
 NV_ENCODE_API_FUNCTION_LIST flist;
-void f(void) { struct { const GUID guid; } s[] = { { NV_ENC_PRESET_HQ_GUID } }; }
+void f(void) { struct { const GUID guid; } s[] = { { NV_ENC_CODEC_H264_GUID } }; }
 int main(void) { return 0; }
 EOF
 
@@ -7609,6 +7712,8 @@ fi
 if enabled aarch64; then
     echo "NEON enabled              ${neon-no}"
     echo "VFP enabled               ${vfp-no}"
+    echo "DOTPROD enabled           ${dotprod-no}"
+    echo "I8MM enabled              ${i8mm-no}"
 fi
 if enabled arm; then
     echo "ARMv5TE enabled           ${armv5te-no}"
@@ -7898,6 +8003,9 @@ test -n "$assert_level" &&
 
 test -n "$malloc_prefix" &&
     echo "#define MALLOC_PREFIX $malloc_prefix" >>$TMPH
+
+enabled aarch64 &&
+    echo "#define AS_ARCH_LEVEL $as_arch_level" >>$TMPH
 
 if enabled x86asm; then
     append config_files $TMPASM

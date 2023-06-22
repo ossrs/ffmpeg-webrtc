@@ -2398,6 +2398,19 @@ static void print_pkt_side_data(WriterContext *w,
     writer_print_section_footer(w);
 }
 
+static void print_private_data(WriterContext *w, void *priv_data)
+{
+    const AVOption *opt = NULL;
+    while (opt = av_opt_next(priv_data, opt)) {
+        uint8_t *str;
+        if (!(opt->flags & AV_OPT_FLAG_EXPORT)) continue;
+        if (av_opt_get(priv_data, opt->name, 0, &str) >= 0) {
+            print_str(opt->name, str);
+            av_free(str);
+        }
+    }
+}
+
 static void print_color_range(WriterContext *w, enum AVColorRange color_range)
 {
     const char *val = av_color_range_name(color_range);
@@ -2447,7 +2460,6 @@ static void print_chroma_location(WriterContext *w, enum AVChromaLocation chroma
         print_str("chroma_location", val);
     }
 }
-
 
 static void clear_log(int need_lock)
 {
@@ -2594,7 +2606,7 @@ static void show_frame(WriterContext *w, AVFrame *frame, AVStream *stream,
     if (s) print_str    ("media_type", s);
     else   print_str_opt("media_type", "unknown");
     print_int("stream_index",           stream->index);
-    print_int("key_frame",              frame->key_frame);
+    print_int("key_frame",           !!(frame->flags & AV_FRAME_FLAG_KEY));
     print_ts  ("pts",                   frame->pts);
     print_time("pts_time",              frame->pts, &stream->time_base);
     print_ts  ("pkt_dts",               frame->pkt_dts);
@@ -2640,8 +2652,8 @@ static void show_frame(WriterContext *w, AVFrame *frame, AVStream *stream,
         print_int("display_picture_number", frame->display_picture_number);
     )
 #endif
-        print_int("interlaced_frame",       frame->interlaced_frame);
-        print_int("top_field_first",        frame->top_field_first);
+        print_int("interlaced_frame",       !!(frame->flags & AV_FRAME_FLAG_INTERLACED));
+        print_int("top_field_first",        !!(frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST));
         print_int("repeat_pict",            frame->repeat_pict);
 
         print_color_range(w, frame->color_range);
@@ -3115,16 +3127,11 @@ static int show_stream(WriterContext *w, AVFormatContext *fmt_ctx, int stream_id
         break;
     }
 
-    if (dec_ctx && dec_ctx->codec->priv_class && show_private_data) {
-        const AVOption *opt = NULL;
-        while (opt = av_opt_next(dec_ctx->priv_data,opt)) {
-            uint8_t *str;
-            if (!(opt->flags & AV_OPT_FLAG_EXPORT)) continue;
-            if (av_opt_get(dec_ctx->priv_data, opt->name, 0, &str) >= 0) {
-                print_str(opt->name, str);
-                av_free(str);
-            }
-        }
+    if (show_private_data) {
+        if (dec_ctx && dec_ctx->codec->priv_class)
+            print_private_data(w, dec_ctx->priv_data);
+        if (fmt_ctx->iformat->priv_class)
+            print_private_data(w, fmt_ctx->priv_data);
     }
 
     if (fmt_ctx->iformat->flags & AVFMT_SHOW_IDS) print_fmt    ("id", "0x%x", stream->id);

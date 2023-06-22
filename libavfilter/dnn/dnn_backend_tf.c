@@ -23,7 +23,6 @@
  * DNN tensorflow backend implementation.
  */
 
-#include "dnn_backend_tf.h"
 #include "libavformat/avio.h"
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
@@ -275,6 +274,7 @@ static int get_input_tf(void *model, DNNData *input, const char *input_name)
     TFModel *tf_model = model;
     TFContext *ctx = &tf_model->ctx;
     TF_Status *status;
+    TF_DataType dt;
     int64_t dims[4];
 
     TF_Output tf_output;
@@ -285,7 +285,18 @@ static int get_input_tf(void *model, DNNData *input, const char *input_name)
     }
 
     tf_output.index = 0;
-    input->dt = TF_OperationOutputType(tf_output);
+    dt = TF_OperationOutputType(tf_output);
+    switch (dt) {
+    case TF_FLOAT:
+        input->dt = DNN_FLOAT;
+        break;
+    case TF_UINT8:
+        input->dt = DNN_UINT8;
+        break;
+    default:
+        av_log(ctx, AV_LOG_ERROR, "Unsupported output type %d in model\n", dt);
+        return AVERROR(EINVAL);
+    }
     input->order = DCO_RGB;
 
     status = TF_NewStatus();
@@ -475,9 +486,48 @@ static int load_tf_model(TFModel *tf_model, const char *model_filename)
     return 0;
 }
 
-#define NAME_BUFFER_SIZE 256
+static void dnn_free_model_tf(DNNModel **model)
+{
+    TFModel *tf_model;
 
-DNNModel *ff_dnn_load_model_tf(const char *model_filename, DNNFunctionType func_type, const char *options, AVFilterContext *filter_ctx)
+    if (*model){
+        tf_model = (*model)->model;
+        while (ff_safe_queue_size(tf_model->request_queue) != 0) {
+            TFRequestItem *item = ff_safe_queue_pop_front(tf_model->request_queue);
+            destroy_request_item(&item);
+        }
+        ff_safe_queue_destroy(tf_model->request_queue);
+
+        while (ff_queue_size(tf_model->lltask_queue) != 0) {
+            LastLevelTaskItem *item = ff_queue_pop_front(tf_model->lltask_queue);
+            av_freep(&item);
+        }
+        ff_queue_destroy(tf_model->lltask_queue);
+
+        while (ff_queue_size(tf_model->task_queue) != 0) {
+            TaskItem *item = ff_queue_pop_front(tf_model->task_queue);
+            av_frame_free(&item->in_frame);
+            av_frame_free(&item->out_frame);
+            av_freep(&item);
+        }
+        ff_queue_destroy(tf_model->task_queue);
+
+        if (tf_model->graph){
+            TF_DeleteGraph(tf_model->graph);
+        }
+        if (tf_model->session){
+            TF_CloseSession(tf_model->session, tf_model->status);
+            TF_DeleteSession(tf_model->session, tf_model->status);
+        }
+        if (tf_model->status){
+            TF_DeleteStatus(tf_model->status);
+        }
+        av_freep(&tf_model);
+        av_freep(model);
+    }
+}
+
+static DNNModel *dnn_load_model_tf(const char *model_filename, DNNFunctionType func_type, const char *options, AVFilterContext *filter_ctx)
 {
     DNNModel *model = NULL;
     TFModel *tf_model = NULL;
@@ -567,7 +617,7 @@ DNNModel *ff_dnn_load_model_tf(const char *model_filename, DNNFunctionType func_
 
     return model;
 err:
-    ff_dnn_free_model_tf(&model);
+    dnn_free_model_tf(&model);
     return NULL;
 }
 
@@ -575,7 +625,7 @@ static int fill_model_input_tf(TFModel *tf_model, TFRequestItem *request) {
     DNNData input;
     LastLevelTaskItem *lltask;
     TaskItem *task;
-    TFInferRequest *infer_request;
+    TFInferRequest *infer_request = NULL;
     TFContext *ctx = &tf_model->ctx;
     int ret = 0;
 
@@ -685,7 +735,7 @@ static void infer_completion_callback(void *args) {
         outputs[i].width = TF_Dim(infer_request->output_tensors[i], 2);
         outputs[i].channels = TF_Dim(infer_request->output_tensors[i], 3);
         outputs[i].data = TF_TensorData(infer_request->output_tensors[i]);
-        outputs[i].dt = TF_TensorType(infer_request->output_tensors[i]);
+        outputs[i].dt = (DNNDataType)TF_TensorType(infer_request->output_tensors[i]);
     }
     switch (tf_model->model->func_type) {
     case DFT_PROCESS_FRAME:
@@ -765,11 +815,11 @@ err:
     if (ff_safe_queue_push_back(tf_model->request_queue, request) < 0) {
         destroy_request_item(&request);
     }
-    ff_dnn_free_model_tf(&tf_model->model);
+    dnn_free_model_tf(&tf_model->model);
     return ret;
 }
 
-int ff_dnn_execute_model_tf(const DNNModel *model, DNNExecBaseParams *exec_params)
+static int dnn_execute_model_tf(const DNNModel *model, DNNExecBaseParams *exec_params)
 {
     TFModel *tf_model = model->model;
     TFContext *ctx = &tf_model->ctx;
@@ -817,13 +867,13 @@ int ff_dnn_execute_model_tf(const DNNModel *model, DNNExecBaseParams *exec_param
     return execute_model_tf(request, tf_model->lltask_queue);
 }
 
-DNNAsyncStatusType ff_dnn_get_result_tf(const DNNModel *model, AVFrame **in, AVFrame **out)
+static DNNAsyncStatusType dnn_get_result_tf(const DNNModel *model, AVFrame **in, AVFrame **out)
 {
     TFModel *tf_model = model->model;
     return ff_dnn_get_result_common(tf_model->task_queue, in, out);
 }
 
-int ff_dnn_flush_tf(const DNNModel *model)
+static int dnn_flush_tf(const DNNModel *model)
 {
     TFModel *tf_model = model->model;
     TFContext *ctx = &tf_model->ctx;
@@ -853,43 +903,10 @@ int ff_dnn_flush_tf(const DNNModel *model)
     return ff_dnn_start_inference_async(ctx, &request->exec_module);
 }
 
-void ff_dnn_free_model_tf(DNNModel **model)
-{
-    TFModel *tf_model;
-
-    if (*model){
-        tf_model = (*model)->model;
-        while (ff_safe_queue_size(tf_model->request_queue) != 0) {
-            TFRequestItem *item = ff_safe_queue_pop_front(tf_model->request_queue);
-            destroy_request_item(&item);
-        }
-        ff_safe_queue_destroy(tf_model->request_queue);
-
-        while (ff_queue_size(tf_model->lltask_queue) != 0) {
-            LastLevelTaskItem *item = ff_queue_pop_front(tf_model->lltask_queue);
-            av_freep(&item);
-        }
-        ff_queue_destroy(tf_model->lltask_queue);
-
-        while (ff_queue_size(tf_model->task_queue) != 0) {
-            TaskItem *item = ff_queue_pop_front(tf_model->task_queue);
-            av_frame_free(&item->in_frame);
-            av_frame_free(&item->out_frame);
-            av_freep(&item);
-        }
-        ff_queue_destroy(tf_model->task_queue);
-
-        if (tf_model->graph){
-            TF_DeleteGraph(tf_model->graph);
-        }
-        if (tf_model->session){
-            TF_CloseSession(tf_model->session, tf_model->status);
-            TF_DeleteSession(tf_model->session, tf_model->status);
-        }
-        if (tf_model->status){
-            TF_DeleteStatus(tf_model->status);
-        }
-        av_freep(&tf_model);
-        av_freep(model);
-    }
-}
+const DNNModule ff_dnn_backend_tf = {
+    .load_model     = dnn_load_model_tf,
+    .execute_model  = dnn_execute_model_tf,
+    .get_result     = dnn_get_result_tf,
+    .flush          = dnn_flush_tf,
+    .free_model     = dnn_free_model_tf,
+};

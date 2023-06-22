@@ -93,7 +93,7 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
             return AVERROR_INVALIDDATA;
         }
 
-        if (!(avpkt->flags & AV_PKT_FLAG_KEY)) {
+        if (prev && !(avpkt->flags & AV_PKT_FLAG_KEY)) {
             for (int j = 0; j < (avctx->width + 7) >> 3; j++)
                 dst[j] ^= prev[j];
             prev += prev_frame->linesize[0];
@@ -107,7 +107,7 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
         return ret;
 
     if (avpkt->flags & AV_PKT_FLAG_KEY) {
-        frame->key_frame = 1;
+        frame->flags |= AV_FRAME_FLAG_KEY;
         frame->pict_type = AV_PICTURE_TYPE_I;
     } else {
         frame->pict_type = AV_PICTURE_TYPE_P;

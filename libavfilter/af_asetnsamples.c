@@ -39,7 +39,7 @@ typedef struct ASNSContext {
 } ASNSContext;
 
 #define OFFSET(x) offsetof(ASNSContext, x)
-#define FLAGS AV_OPT_FLAG_AUDIO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
+#define FLAGS AV_OPT_FLAG_AUDIO_PARAM|AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_RUNTIME_PARAM
 
 static const AVOption asetnsamples_options[] = {
     { "nb_out_samples", "set the number of per-frame output samples", OFFSET(nb_out_samples), AV_OPT_TYPE_INT, {.i64=1024}, 1, INT_MAX, FLAGS },
@@ -61,12 +61,15 @@ static int activate(AVFilterContext *ctx)
 
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
-    ret = ff_inlink_consume_samples(inlink, s->nb_out_samples, s->nb_out_samples, &frame);
+    if (ctx->is_disabled)
+        ret = ff_inlink_consume_frame(inlink, &frame);
+    else
+        ret = ff_inlink_consume_samples(inlink, s->nb_out_samples, s->nb_out_samples, &frame);
     if (ret < 0)
         return ret;
 
     if (ret > 0) {
-        if (!s->pad || frame->nb_samples == s->nb_out_samples)
+        if (!s->pad || ctx->is_disabled || frame->nb_samples == s->nb_out_samples)
             return ff_filter_frame(outlink, frame);
 
         pad_frame = ff_get_audio_buffer(outlink, s->nb_out_samples);
@@ -123,4 +126,6 @@ const AVFilter ff_af_asetnsamples = {
     FILTER_INPUTS(asetnsamples_inputs),
     FILTER_OUTPUTS(asetnsamples_outputs),
     .activate    = activate,
+    .flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
+    .process_command = ff_filter_process_command,
 };

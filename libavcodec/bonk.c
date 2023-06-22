@@ -270,14 +270,14 @@ static inline int shift(int a, int b)
 
 static int predictor_calc_error(int *k, int *state, int order, int error)
 {
-    int i, x = error - shift_down(k[order-1] * state[order-1], LATTICE_SHIFT);
+    int i, x = error - shift_down(k[order-1] * (unsigned)state[order-1], LATTICE_SHIFT);
     int *k_ptr = &(k[order-2]),
         *state_ptr = &(state[order-2]);
 
     for (i = order-2; i >= 0; i--, k_ptr--, state_ptr--) {
         unsigned k_value = *k_ptr, state_value = *state_ptr;
 
-        x -= shift_down(k_value * state_value, LATTICE_SHIFT);
+        x -= shift_down(k_value * (unsigned)state_value, LATTICE_SHIFT);
         state_ptr[1] = state_value + shift_down(k_value * x, LATTICE_SHIFT);
     }
 
@@ -428,8 +428,10 @@ const FFCodec ff_bonk_decoder = {
     FF_CODEC_DECODE_CB(bonk_decode),
     .close            = bonk_close,
     .p.capabilities   = AV_CODEC_CAP_DELAY |
-                        AV_CODEC_CAP_DR1 |
-                        AV_CODEC_CAP_SUBFRAMES,
+#if FF_API_SUBFRAMES
+                        AV_CODEC_CAP_SUBFRAMES |
+#endif
+                        AV_CODEC_CAP_DR1,
     .caps_internal    = FF_CODEC_CAP_INIT_CLEANUP,
     .p.sample_fmts    = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_S16P,
                                                         AV_SAMPLE_FMT_NONE },

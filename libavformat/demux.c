@@ -120,6 +120,7 @@ static int set_codec_from_probe_data(AVFormatContext *s, AVStream *st,
         { "mp3",        AV_CODEC_ID_MP3,          AVMEDIA_TYPE_AUDIO    },
         { "mpegvideo",  AV_CODEC_ID_MPEG2VIDEO,   AVMEDIA_TYPE_VIDEO    },
         { "truehd",     AV_CODEC_ID_TRUEHD,       AVMEDIA_TYPE_AUDIO    },
+        { "evc",        AV_CODEC_ID_EVC,          AVMEDIA_TYPE_VIDEO    },
         { 0 }
     };
     int score;
@@ -212,6 +213,8 @@ FF_ENABLE_DEPRECATION_WARNINGS
         ret = avcodec_parameters_to_context(sti->avctx, st->codecpar);
         if (ret < 0)
             return ret;
+
+        sti->codec_desc = avcodec_descriptor_get(sti->avctx->codec_id);
 
         sti->need_context_update = 0;
     }
@@ -668,14 +671,20 @@ static void compute_frame_duration(AVFormatContext *s, int *pnum, int *pden,
         if (st->r_frame_rate.num && (!pc || !codec_framerate.num)) {
             *pnum = st->r_frame_rate.den;
             *pden = st->r_frame_rate.num;
+        } else if ((s->iformat->flags & AVFMT_NOTIMESTAMPS) &&
+                   !codec_framerate.num &&
+                   st->avg_frame_rate.num && st->avg_frame_rate.den) {
+            *pnum = st->avg_frame_rate.den;
+            *pden = st->avg_frame_rate.num;
         } else if (st->time_base.num * 1000LL > st->time_base.den) {
             *pnum = st->time_base.num;
             *pden = st->time_base.den;
         } else if (codec_framerate.den * 1000LL > codec_framerate.num) {
-            av_assert0(sti->avctx->ticks_per_frame);
+            int ticks_per_frame = (sti->codec_desc &&
+                                   (sti->codec_desc->props & AV_CODEC_PROP_FIELDS)) ? 2 : 1;
             av_reduce(pnum, pden,
                       codec_framerate.den,
-                      codec_framerate.num * (int64_t)sti->avctx->ticks_per_frame,
+                      codec_framerate.num * (int64_t)ticks_per_frame,
                       INT_MAX);
 
             if (pc && pc->repeat_pict) {
@@ -687,7 +696,8 @@ static void compute_frame_duration(AVFormatContext *s, int *pnum, int *pden,
             /* If this codec can be interlaced or progressive then we need
              * a parser to compute duration of a packet. Thus if we have
              * no parser in such case leave duration undefined. */
-            if (sti->avctx->ticks_per_frame > 1 && !pc)
+            if (sti->codec_desc &&
+                (sti->codec_desc->props & AV_CODEC_PROP_FIELDS) && !pc)
                 *pnum = *pden = 0;
         }
         break;
@@ -1186,6 +1196,11 @@ static int parse_packet(AVFormatContext *s, AVPacket *pkt,
                                      st->time_base,
                                      AV_ROUND_DOWN);
             }
+        } else if ((s->iformat->flags & AVFMT_NOTIMESTAMPS) && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            if (st->time_base.num > 0 && st->time_base.den > 0 &&
+                sti->parser->duration) {
+                out_pkt->duration = sti->parser->duration;
+            }
         }
 
         out_pkt->stream_index = st->index;
@@ -1282,6 +1297,8 @@ static int read_frame_internal(AVFormatContext *s, AVPacket *pkt)
                 av_packet_unref(pkt);
                 return ret;
             }
+
+            sti->codec_desc = avcodec_descriptor_get(sti->avctx->codec_id);
 
             sti->need_context_update = 0;
         }
@@ -2159,9 +2176,10 @@ static int get_std_framerate(int i)
 static int tb_unreliable(AVFormatContext *ic, AVStream *st)
 {
     FFStream *const sti = ffstream(st);
+    const AVCodecDescriptor *desc = sti->codec_desc;
     AVCodecContext *c = sti->avctx;
-    AVRational time_base = c->framerate.num ? av_inv_q(av_mul_q(c->framerate,
-                                                                (AVRational){c->ticks_per_frame, 1}))
+    AVRational mul = (AVRational){ desc && (desc->props & AV_CODEC_PROP_FIELDS) ? 2 : 1, 1 };
+    AVRational time_base = c->framerate.num ? av_inv_q(av_mul_q(c->framerate, mul))
                                             /* NOHEADER check added to not break existing behavior */
                                             : (((ic->ctx_flags & AVFMTCTX_NOHEADER) ||
                                                 st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ? (AVRational){0, 1}
@@ -2713,13 +2731,14 @@ int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options)
                 break;
             }
             if (pkt->duration > 0) {
+                const int fields = sti->codec_desc && (sti->codec_desc->props & AV_CODEC_PROP_FIELDS);
                 if (avctx->codec_type == AVMEDIA_TYPE_SUBTITLE && pkt->pts != AV_NOPTS_VALUE && st->start_time != AV_NOPTS_VALUE && pkt->pts >= st->start_time
                     && (uint64_t)pkt->pts - st->start_time < INT64_MAX
                 ) {
                     sti->info->codec_info_duration = FFMIN(pkt->pts - st->start_time, sti->info->codec_info_duration + pkt->duration);
                 } else
                     sti->info->codec_info_duration += pkt->duration;
-                sti->info->codec_info_duration_fields += sti->parser && sti->need_parsing && avctx->ticks_per_frame == 2
+                sti->info->codec_info_duration_fields += sti->parser && sti->need_parsing && fields
                                                          ? sti->parser->repeat_pict + 1 : 2;
             }
         }
@@ -2859,20 +2878,18 @@ int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options)
                               best_fps, 12 * 1001, INT_MAX);
             }
             if (!st->r_frame_rate.num) {
-                AVRational time_base = avctx->framerate.num ? av_inv_q(av_mul_q(avctx->framerate,
-                                                                       (AVRational){avctx->ticks_per_frame, 1}))
-                                                            /* NOHEADER check added to not break existing behavior */
-                                                            : ((ic->ctx_flags & AVFMTCTX_NOHEADER) ? (AVRational){0, 1}
-                                                                                                   : st->time_base);
-                if (   time_base.den * (int64_t) st->time_base.num
-                    <= time_base.num * (uint64_t)avctx->ticks_per_frame * st->time_base.den) {
-                    av_reduce(&st->r_frame_rate.num, &st->r_frame_rate.den,
-                              time_base.den, (int64_t)time_base.num * avctx->ticks_per_frame, INT_MAX);
+                const AVCodecDescriptor *desc = sti->codec_desc;
+                AVRational mul = (AVRational){ desc && (desc->props & AV_CODEC_PROP_FIELDS) ? 2 : 1, 1 };
+                AVRational  fr = av_mul_q(avctx->framerate, mul);
+
+                if (fr.num && fr.den && av_cmp_q(st->time_base, av_inv_q(fr)) <= 0) {
+                    st->r_frame_rate = fr;
                 } else {
                     st->r_frame_rate.num = st->time_base.den;
                     st->r_frame_rate.den = st->time_base.num;
                 }
             }
+            st->codecpar->framerate = avctx->framerate;
             if (sti->display_aspect_ratio.num && sti->display_aspect_ratio.den) {
                 AVRational hw_ratio = { avctx->height, avctx->width };
                 st->sample_aspect_ratio = av_mul_q(sti->display_aspect_ratio,

@@ -1119,7 +1119,6 @@ static int dwa_uncompress(const EXRContext *s, const uint8_t *src, int compresse
             }
 
             {
-                const float scale = s->pixel_type == EXR_FLOAT ? 2.f : 1.f;
                 const int o = s->nb_channels == 4;
                 float *bo = ((float *)td->uncompressed_data) +
                     y * td->xsize * s->nb_channels + td->xsize * (o + 0) + x;
@@ -1137,9 +1136,9 @@ static int dwa_uncompress(const EXRContext *s, const uint8_t *src, int compresse
 
                         convert(yb[idx], ub[idx], vb[idx], &bo[xx], &go[xx], &ro[xx]);
 
-                        bo[xx] = to_linear(bo[xx], scale);
-                        go[xx] = to_linear(go[xx], scale);
-                        ro[xx] = to_linear(ro[xx], scale);
+                        bo[xx] = to_linear(bo[xx], 1.f);
+                        go[xx] = to_linear(go[xx], 1.f);
+                        ro[xx] = to_linear(ro[xx], 1.f);
                     }
 
                     bo += td->xsize * s->nb_channels;
@@ -1930,8 +1929,10 @@ static int decode_header(EXRContext *s, AVFrame *frame)
 
             bytestream2_get_buffer(gb, key, FFMIN(sizeof(key) - 1, var_size));
             if (strncmp("scanlineimage", key, var_size) &&
-                strncmp("tiledimage", key, var_size))
-                return AVERROR_PATCHWELCOME;
+                strncmp("tiledimage", key, var_size)) {
+                ret = AVERROR_PATCHWELCOME;
+                goto fail;
+            }
 
             continue;
         } else if ((var_size = check_header_variable(s, "preview",
@@ -1939,12 +1940,16 @@ static int decode_header(EXRContext *s, AVFrame *frame)
             uint32_t pw = bytestream2_get_le32(gb);
             uint32_t ph = bytestream2_get_le32(gb);
             uint64_t psize = pw * ph;
-            if (psize > INT64_MAX / 4)
-                return AVERROR_INVALIDDATA;
+            if (psize > INT64_MAX / 4) {
+                ret = AVERROR_INVALIDDATA;
+                goto fail;
+            }
             psize *= 4;
 
-            if ((int64_t)psize >= bytestream2_get_bytes_left(gb))
-                return AVERROR_INVALIDDATA;
+            if ((int64_t)psize >= bytestream2_get_bytes_left(gb)) {
+                ret = AVERROR_INVALIDDATA;
+                goto fail;
+            }
 
             bytestream2_skip(gb, psize);
 

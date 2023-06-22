@@ -864,6 +864,13 @@ Enable the encoder to use ABR when set to 1. The @command{lame}
 @option{--abr} sets the target bitrate, while this options only
 tells FFmpeg to use ABR still relies on @option{b} to set bitrate.
 
+@item copyright (@emph{-c})
+Set MPEG audio copyright flag when set to 1. The default value is 0
+(disabled).
+
+@item original (@emph{-o})
+Set MPEG audio original flag when set to 1. The default value is 1
+(enabled).
 @end table
 
 @section libopencore-amrnb
@@ -3053,6 +3060,20 @@ MediaFoundation framework. It can access both SW and HW encoders.
 Video encoders can take input in either of nv12 or yuv420p form
 (some encoders support both, some support only either - in practice,
 nv12 is the safer choice, especially among HW encoders).
+
+@section Microsoft RLE
+
+Microsoft RLE aka MSRLE encoder.
+Only 8-bit palette mode supported.
+Compatible with Windows 3.1 and Windows 95.
+
+@subsection Options
+
+@table @option
+@item g @var{integer}
+Keyframe interval.
+A keyframe is inserted at least every @code{-g} frames, sometimes sooner.
+@end table
 
 @section mpeg2
 

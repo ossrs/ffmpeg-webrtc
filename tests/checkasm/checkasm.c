@@ -105,6 +105,9 @@ static const struct {
     #if CONFIG_G722DSP
         { "g722dsp", checkasm_check_g722dsp },
     #endif
+    #if CONFIG_H264CHROMA
+        { "h264chroma", checkasm_check_h264chroma },
+    #endif
     #if CONFIG_H264DSP
         { "h264dsp", checkasm_check_h264dsp },
     #endif
@@ -227,6 +230,8 @@ static const struct {
 #if   ARCH_AARCH64
     { "ARMV8",    "armv8",    AV_CPU_FLAG_ARMV8 },
     { "NEON",     "neon",     AV_CPU_FLAG_NEON },
+    { "DOTPROD",  "dotprod",  AV_CPU_FLAG_DOTPROD },
+    { "I8MM",     "i8mm",     AV_CPU_FLAG_I8MM },
 #elif ARCH_ARM
     { "ARMV5TE",  "armv5te",  AV_CPU_FLAG_ARMV5TE },
     { "ARMV6",    "armv6",    AV_CPU_FLAG_ARMV6 },
