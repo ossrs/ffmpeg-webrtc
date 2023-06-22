@@ -1,0 +1,166 @@
+name: "OpenSSL"
+
+# @see https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#onpushpull_requestbranchestags
+on:
+  push:
+    branches:
+      - 'feature/openssl'
+
+jobs:
+  openssl_1_0_1k:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build OpenSSL 1.0.1k
+        run: |
+          docker build -t ssl -f tmp/Dockerfile.1_0_1k .
+          docker run --rm ssl bash -c " \
+              cd /usr/local/srs && env SRS_DISABLE_DAEMON_FOR_DOCKER=off SRS_DAEMON=on \
+                  ./objs/srs -c conf/rtc2rtmp.conf && \
+              cd /g && ./ffmpeg -loglevel verbose -re \
+                  -t 30s -f lavfi -i testsrc=size=1280x720 \
+                  -t 30s -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+                  -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+                  -f whip 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream' \
+            "
+          echo "OK"
+
+  openssl_1_0_2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build OpenSSL 1.0.2
+        run: |
+          docker build -t ssl -f tmp/Dockerfile.1_0_2 .
+          docker run --rm ssl bash -c " \
+              cd /usr/local/srs && env SRS_DISABLE_DAEMON_FOR_DOCKER=off SRS_DAEMON=on \
+                  ./objs/srs -c conf/rtc2rtmp.conf && \
+              cd /g && ./ffmpeg -loglevel verbose -re \
+                  -t 30s -f lavfi -i testsrc=size=1280x720 \
+                  -t 30s -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+                  -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+                  -f whip 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream' \
+            "
+          echo "OK"
+
+  openssl_1_0_2u:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build OpenSSL 1.0.2u
+        run: |
+          docker build -t ssl -f tmp/Dockerfile.1_0_2u .
+          docker run --rm ssl bash -c " \
+              cd /usr/local/srs && env SRS_DISABLE_DAEMON_FOR_DOCKER=off SRS_DAEMON=on \
+                  ./objs/srs -c conf/rtc2rtmp.conf && \
+              cd /g && ./ffmpeg -loglevel verbose -re \
+                  -t 30s -f lavfi -i testsrc=size=1280x720 \
+                  -t 30s -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+                  -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+                  -f whip 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream' \
+            "
+          echo "OK"
+
+  openssl_1_1_0h:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build OpenSSL 1.1.0h
+        run: |
+          docker build -t ssl -f tmp/Dockerfile.1_1_0h .
+          docker run --rm ssl bash -c " \
+              cd /usr/local/srs && env SRS_DISABLE_DAEMON_FOR_DOCKER=off SRS_DAEMON=on \
+                  ./objs/srs -c conf/rtc2rtmp.conf && \
+              cd /g && ./ffmpeg -loglevel verbose -re \
+                  -t 30s -f lavfi -i testsrc=size=1280x720 \
+                  -t 30s -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+                  -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+                  -f whip 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream' \
+            "
+          echo "OK"
+
+  openssl_1_1_1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build OpenSSL 1.1.1
+        run: |
+          docker build -t ssl -f tmp/Dockerfile.1_1_1 .
+          docker run --rm ssl bash -c " \
+              cd /usr/local/srs && env SRS_DISABLE_DAEMON_FOR_DOCKER=off SRS_DAEMON=on \
+                  ./objs/srs -c conf/rtc2rtmp.conf && \
+              cd /g && ./ffmpeg -loglevel verbose -re \
+                  -t 30s -f lavfi -i testsrc=size=1280x720 \
+                  -t 30s -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+                  -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+                  -f whip 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream' \
+            "
+          echo "OK"
+
+  openssl_1_1_1t:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build OpenSSL 1.1.1t
+        run: |
+          docker build -t ssl -f tmp/Dockerfile.1_1_1t .
+          docker run --rm ssl bash -c " \
+              cd /usr/local/srs && env SRS_DISABLE_DAEMON_FOR_DOCKER=off SRS_DAEMON=on \
+                  ./objs/srs -c conf/rtc2rtmp.conf && \
+              cd /g && ./ffmpeg -loglevel verbose -re \
+                  -t 30s -f lavfi -i testsrc=size=1280x720 \
+                  -t 30s -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+                  -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+                  -f whip 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream' \
+            "
+          echo "OK"
+
+  openssl_3_0_8:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build OpenSSL 3.0.8
+        run: |
+          docker build -t ssl -f tmp/Dockerfile.3_0_8 .
+          docker run --rm ssl bash -c " \
+              cd /usr/local/srs && env SRS_DISABLE_DAEMON_FOR_DOCKER=off SRS_DAEMON=on \
+                  ./objs/srs -c conf/rtc2rtmp.conf && \
+              cd /g && ./ffmpeg -loglevel verbose -re \
+                  -t 30s -f lavfi -i testsrc=size=1280x720 \
+                  -t 30s -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+                  -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+                  -f whip 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream' \
+            "
+          echo "OK"
+
+  openssl_3_1_0:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build OpenSSL 3.1.0
+        run: |
+          docker build -t ssl -f tmp/Dockerfile.3_1_0 .
+          docker run --rm ssl bash -c " \
+              cd /usr/local/srs && env SRS_DISABLE_DAEMON_FOR_DOCKER=off SRS_DAEMON=on \
+                  ./objs/srs -c conf/rtc2rtmp.conf && \
+              cd /g && ./ffmpeg -loglevel verbose -re \
+                  -t 30s -f lavfi -i testsrc=size=1280x720 \
+                  -t 30s -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+                  -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+                  -f whip 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream' \
+            "
+          echo "OK"
+
+  done:
+    runs-on: ubuntu-latest
+    needs:
+      - openssl_1_0_1k
+      - openssl_1_0_2
+      - openssl_1_0_2u
+      - openssl_1_1_0h
+      - openssl_1_1_1
+      - openssl_1_1_1t
+      - openssl_3_0_8
+      - openssl_3_1_0
+    steps:
+      - run: echo "Done"

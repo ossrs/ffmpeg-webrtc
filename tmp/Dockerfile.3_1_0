@@ -1,11 +1,11 @@
-FROM ubuntu:focal
+FROM ossrs/srs:5
 
 # https://serverfault.com/questions/949991/how-to-install-tzdata-on-a-ubuntu-docker-image
 ENV DEBIAN_FRONTEND=noninteractive
 
 # See https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#apt-get
 # Note that nasm, libopus-dev, and libx264-dev are for FFmpeg.
-RUN apt update && apt install -y \
+RUN apt-get update && apt-get install -y \
     gdb gcc g++ make patch autoconf automake libtool pkg-config \
     nasm libopus-dev libx264-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -16,13 +16,13 @@ WORKDIR /g
 # See https://github.com/openssl/openssl/releases/tag/openssl-3.1.0
 RUN cd tmp && tar xf openssl-3.1.0.tar.gz
 WORKDIR /g/tmp/openssl-3.1.0
-RUN ./config && make && make install_sw
+RUN ./config --prefix=/usr/local/ssl && make && make install_sw
 
 # Build FFmpeg with openssl.
 WORKDIR /g
-ENV PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig
+ENV PKG_CONFIG_PATH=/usr/local/ssl/lib64/pkgconfig LD_LIBRARY_PATH=/usr/local/ssl/lib64
 RUN ./configure --enable-debug --disable-optimizations --disable-stripping \
-        --enable-muxer=rtc --enable-openssl --enable-nonfree --enable-version3 \
+        --enable-muxer=whip --enable-openssl --enable-nonfree --enable-version3 \
         --enable-libx264 --enable-gpl --enable-libopus && \
-        make -j10
+        make clean && make
 
