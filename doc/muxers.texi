@@ -1333,6 +1333,56 @@ Set custom HTTP headers, can override built in default headers. Applicable only 
 
 @end table
 
+@anchor{rtc}
+@section rtc
+
+WebRTC (Real-Time Communication) muxer that supports sub-second latency streaming according to
+the WHIP (WebRTC-HTTP ingestion protocol) specification.
+
+It uses HTTP as a signaling protocol to exchange SDP capabilities and ICE lite candidates. Then,
+it uses STUN binding requests and responses to establish a session over UDP. Subsequently, it
+initiates a DTLS handshake to exchange the SRTP encryption keys. Lastly, it splits video and
+audio frames into RTP packets and encrypts them using SRTP.
+
+Ensure that you use H.264 without B frames and Opus for the audio codec. For example, to convert
+an input file with @command{ffmpeg} to WebRTC:
+@example
+ffmpeg -re -i input.mp4 -acodec libopus -ar 48000 -ac 2 \
+  -vcodec libx264 -profile:v baseline -tune zerolatency -threads 1 -bf 0 \
+  -f rtc "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream"
+@end example
+
+For this example, we have employed low latency options, resulting in an end-to-end latency of
+approximately 150ms.
+
+@subsection Options
+
+This muxer supports the following options:
+
+@table @option
+
+@item ice_arq_max @var{size}
+Set the maximum number of retransmissions for the ICE ARQ mechanism.
+Default value is 5.
+
+@item ice_arq_timeout @var{size}
+Set the start timeout in milliseconds for the ICE ARQ mechanism.
+Default value is 30.
+
+@item dtls_arq_max @var{size}
+Set the maximum number of retransmissions for the DTLS ARQ mechanism.
+Default value is 5.
+
+@item dtls_arq_timeout @var{size}
+Set the start timeout in milliseconds for the DTLS ARQ mechanism.
+Default value is 50.
+
+@item pkt_size @var{size}
+Set the maximum size, in bytes, of RTP packets that send out.
+Default value is 1500.
+
+@end table
+
 @anchor{ico}
 @section ico
 
