@@ -49,6 +49,11 @@
 #define MAX_SDP_SIZE 8192
 
 /**
+ * Maximum size limit of a certificate and private key size.
+ */
+#define MAX_CERTIFICATE_SIZE 8192
+
+/**
  * Maximum size of the buffer for sending and receiving UDP packets.
  * Please note that this size does not limit the size of the UDP packet that can be sent.
  * To set the limit for packet size, modify the `pkt_size` parameter.
@@ -151,6 +156,49 @@
 
 /* Calculate the elapsed time from starttime to endtime in milliseconds. */
 #define ELAPSED(starttime, endtime) ((int)(endtime - starttime) / 1000)
+
+/**
+ * Read all data from the given URL url and store it in the given buffer bp.
+ */
+static int url_read_all(AVFormatContext *s, const char *url, AVBPrint *bp)
+{
+    int ret = 0;
+    AVDictionary *opts = NULL;
+    URLContext *uc = NULL;
+    char buf[MAX_URL_SIZE];
+
+    ret = ffurl_open_whitelist(&uc, url, AVIO_FLAG_READ, &s->interrupt_callback,
+        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
+    if (ret < 0) {
+        av_log(s, AV_LOG_ERROR, "WHIP: Failed to open url %s\n", url);
+        goto end;
+    }
+
+    while (1) {
+        ret = ffurl_read(uc, buf, sizeof(buf));
+        if (ret == AVERROR_EOF) {
+            /* Reset the error because we read all response as answer util EOF. */
+            ret = 0;
+            break;
+        }
+        if (ret <= 0) {
+            av_log(s, AV_LOG_ERROR, "WHIP: Failed to read from url=%s, key is %s\n", url, bp->str);
+            goto end;
+        }
+
+        av_bprintf(bp, "%.*s", ret, buf);
+        if (!av_bprint_is_complete(bp)) {
+            av_log(s, AV_LOG_ERROR, "WHIP: Exceed max size %.*s, %s\n", ret, buf, bp->str);
+            ret = AVERROR(EIO);
+            goto end;
+        }
+    }
+
+end:
+    ffurl_closep(&uc);
+    av_dict_free(&opts);
+    return ret;
+}
 
 /* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
 enum STUNAttr {
@@ -424,33 +472,50 @@ static long openssl_dtls_bio_out_callback_ex(BIO *b, int oper, const char *argp,
     return retvalue;
 }
 
-static int openssl_read_certificate(DTLSContext *ctx)
+static int openssl_read_certificate(AVFormatContext *s, DTLSContext *ctx)
 {
     int ret = 0;
-    FILE *fp_key = NULL, *fp_cert = NULL;
+    BIO *key_b = NULL, *cert_b = NULL;
+    AVBPrint key_bp, cert_bp;
 
-    fp_key = fopen(ctx->key_file, "r");
-    if (!fp_key) {
+    /* To prevent a crash during cleanup, always initialize it. */
+    av_bprint_init(&key_bp, 1, MAX_CERTIFICATE_SIZE);
+    av_bprint_init(&cert_bp, 1, MAX_CERTIFICATE_SIZE);
+
+    /* Read key file. */
+    ret = url_read_all(s, ctx->key_file, &key_bp);
+    if (ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to open key file %s\n", ctx->key_file);
-        ret = AVERROR(EIO);
         goto end;
     }
 
-    ctx->dtls_pkey = PEM_read_PrivateKey(fp_key, NULL, NULL, NULL);
+    if ((key_b = BIO_new(BIO_s_mem())) == NULL) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    BIO_write(key_b, key_bp.str, key_bp.len);
+    ctx->dtls_pkey = PEM_read_bio_PrivateKey(key_b, NULL, NULL, NULL);
     if (!ctx->dtls_pkey) {
         av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to read private key from %s\n", ctx->key_file);
         ret = AVERROR(EIO);
         goto end;
     }
 
-    fp_cert = fopen(ctx->cert_file, "r");
-    if (!fp_cert) {
-        av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to open certificate file %s\n", ctx->cert_file);
-        ret = AVERROR(EIO);
+    /* Read certificate. */
+    ret = url_read_all(s, ctx->cert_file, &cert_bp);
+    if (ret < 0) {
+        av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to open cert file %s\n", ctx->cert_file);
         goto end;
     }
 
-    ctx->dtls_cert = PEM_read_X509(fp_cert, NULL, NULL, NULL);
+    if ((cert_b = BIO_new(BIO_s_mem())) == NULL) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    BIO_write(cert_b, cert_bp.str, cert_bp.len);
+    ctx->dtls_cert = PEM_read_bio_X509(cert_b, NULL, NULL, NULL);
     if (!ctx->dtls_cert) {
         av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to read certificate from %s\n", ctx->cert_file);
         ret = AVERROR(EIO);
@@ -458,8 +523,10 @@ static int openssl_read_certificate(DTLSContext *ctx)
     }
 
 end:
-    if (fp_key) fclose(fp_key);
-    if (fp_cert) fclose(fp_cert);
+    BIO_free(key_b);
+    av_bprint_finalize(&key_bp, NULL);
+    BIO_free(cert_b);
+    av_bprint_finalize(&cert_bp, NULL);
     return ret;
 }
 
@@ -778,7 +845,7 @@ static av_cold int openssl_dtls_init_context(DTLSContext *ctx)
  * ff_openssl_init in tls_openssl.c has already called SSL_library_init(), and therefore,
  * there is no need to call it again.
  */
-static av_cold int dtls_context_init(DTLSContext *ctx)
+static av_cold int dtls_context_init(AVFormatContext *s, DTLSContext *ctx)
 {
     int ret = 0;
 
@@ -786,7 +853,7 @@ static av_cold int dtls_context_init(DTLSContext *ctx)
 
     if (ctx->cert_file && ctx->key_file) {
         /* Read the private key and file from the file. */
-        if ((ret = openssl_read_certificate(ctx)) < 0) {
+        if ((ret = openssl_read_certificate(s, ctx)) < 0) {
             av_log(ctx, AV_LOG_ERROR, "DTLS: Failed to read DTLS certificate from cert=%s, key=%s\n",
                 ctx->cert_file, ctx->key_file);
             return ret;
@@ -1147,7 +1214,7 @@ static av_cold int initialize(AVFormatContext *s)
     if (whip->key_file)
         whip->dtls_ctx.key_file = av_strdup(whip->key_file);
 
-    if ((ret = dtls_context_init(&whip->dtls_ctx)) < 0) {
+    if ((ret = dtls_context_init(s, &whip->dtls_ctx)) < 0) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to init DTLS context\n");
         return ret;
     }
