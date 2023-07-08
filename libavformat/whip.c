@@ -730,7 +730,8 @@ static av_cold int openssl_dtls_init_context(DTLSContext *ctx)
     dtls_ctx = ctx->dtls_ctx = SSL_CTX_new(DTLS_method());
 #endif
     if (!dtls_ctx) {
-        return AVERROR(ENOMEM);
+        ret = AVERROR(ENOMEM);
+        goto end;
     }
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L /* OpenSSL 1.0.2 */
@@ -738,7 +739,8 @@ static av_cold int openssl_dtls_init_context(DTLSContext *ctx)
     if (SSL_CTX_set1_curves_list(dtls_ctx, curves) != 1) {
         av_log(ctx, AV_LOG_ERROR, "DTLS: Init SSL_CTX_set1_curves_list failed, curves=%s, %s\n",
             curves, openssl_get_error(ctx));
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        return ret;
     }
 #endif
 
@@ -758,16 +760,19 @@ static av_cold int openssl_dtls_init_context(DTLSContext *ctx)
     if (SSL_CTX_set_cipher_list(dtls_ctx, ciphers) != 1) {
         av_log(ctx, AV_LOG_ERROR, "DTLS: Init SSL_CTX_set_cipher_list failed, ciphers=%s, %s\n",
             ciphers, openssl_get_error(ctx));
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        return ret;
     }
     /* Setup the certificate. */
     if (SSL_CTX_use_certificate(dtls_ctx, dtls_cert) != 1) {
         av_log(ctx, AV_LOG_ERROR, "DTLS: Init SSL_CTX_use_certificate failed, %s\n", openssl_get_error(ctx));
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        return ret;
     }
     if (SSL_CTX_use_PrivateKey(dtls_ctx, dtls_pkey) != 1) {
         av_log(ctx, AV_LOG_ERROR, "DTLS: Init SSL_CTX_use_PrivateKey failed, %s\n", openssl_get_error(ctx));
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        return ret;
     }
 
     /* Server will send Certificate Request. */
@@ -781,13 +786,15 @@ static av_cold int openssl_dtls_init_context(DTLSContext *ctx)
     if (SSL_CTX_set_tlsext_use_srtp(dtls_ctx, profiles)) {
         av_log(ctx, AV_LOG_ERROR, "DTLS: Init SSL_CTX_set_tlsext_use_srtp failed, profiles=%s, %s\n",
             profiles, openssl_get_error(ctx));
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        return ret;
     }
 
     /* The dtls should not be created unless the dtls_ctx has been initialized. */
     dtls = ctx->dtls = SSL_new(dtls_ctx);
     if (!dtls) {
-        return AVERROR(ENOMEM);
+        ret = AVERROR(ENOMEM);
+        goto end;
     }
 
     /* Setup the callback for logging. */
@@ -804,14 +811,16 @@ static av_cold int openssl_dtls_init_context(DTLSContext *ctx)
     DTLS_set_link_mtu(dtls, ctx->mtu);
 #endif
 
-    bio_in = ctx->bio_in = BIO_new(BIO_s_mem());
+    bio_in = BIO_new(BIO_s_mem());
     if (!bio_in) {
-        return AVERROR(ENOMEM);
+        ret = AVERROR(ENOMEM);
+        goto end;
     }
 
     bio_out = BIO_new(BIO_s_mem());
     if (!bio_out) {
-        return AVERROR(ENOMEM);
+        ret = AVERROR(ENOMEM);
+        goto end;
     }
 
     /**
@@ -835,8 +844,14 @@ static av_cold int openssl_dtls_init_context(DTLSContext *ctx)
 #endif
     BIO_set_callback_arg(bio_out, (char*)ctx);
 
+    ctx->bio_in = bio_in;
     SSL_set_bio(dtls, bio_in, bio_out);
+    /* Now the bio_in and bio_out are owned by dtls, so we should set them to NULL. */
+    bio_in = bio_out = NULL;
 
+end:
+    BIO_free(bio_in);
+    BIO_free(bio_out);
     return ret;
 }
 
