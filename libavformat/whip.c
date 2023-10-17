@@ -275,7 +275,7 @@ static int dtls_context_on_state(void *pctx, void *opaque, int state, const char
     if (state == DTLS_STATE_FINISHED && whip->state < WHIP_STATE_DTLS_FINISHED) {
         whip->state = WHIP_STATE_DTLS_FINISHED;
         whip->whip_dtls_time = av_gettime();
-        av_log(whip, AV_LOG_VERBOSE, "WHIP: DTLS handshake, elapsed=%dms\n", ELAPSED(whip->whip_starttime, av_gettime()));
+        av_log(whip, AV_LOG_INFO, "WHIP: DTLS handshake ok, elapsed=%dms\n", ELAPSED(whip->whip_starttime, av_gettime()));
         return ret;
     }
 
@@ -619,7 +619,7 @@ static int generate_sdp_offer(AVFormatContext *s)
     if (whip->state < WHIP_STATE_OFFER)
         whip->state = WHIP_STATE_OFFER;
     whip->whip_offer_time = av_gettime();
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: Generated state=%d, offer: %s\n", whip->state, whip->sdp_offer);
+    av_log(whip, AV_LOG_INFO, "WHIP: Generated state=%d, offer: %s\n", whip->state, whip->sdp_offer);
 
 end:
     av_bprint_finalize(&bp, NULL);
@@ -721,7 +721,8 @@ static int exchange_sdp(AVFormatContext *s)
 
     if (whip->state < WHIP_STATE_ANSWER)
         whip->state = WHIP_STATE_ANSWER;
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: Got state=%d, answer: %s\n", whip->state, whip->sdp_answer);
+    av_log(whip, AV_LOG_INFO, "WHIP: Got state=%d, answer: %s, location=%s\n", whip->state, whip->sdp_answer,
+        whip->whip_resource_url ? whip->whip_resource_url : "");
 
 end:
     ffurl_closep(&whip_uc);
@@ -827,7 +828,7 @@ static int parse_answer(AVFormatContext *s)
     if (whip->state < WHIP_STATE_NEGOTIATED)
         whip->state = WHIP_STATE_NEGOTIATED;
     whip->whip_answer_time = av_gettime();
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: SDP state=%d, offer=%luB, answer=%luB, ufrag=%s, pwd=%luB, transport=%s://%s:%d, elapsed=%dms\n",
+    av_log(whip, AV_LOG_INFO, "WHIP: SDP state=%d, offer=%luB, answer=%luB, ufrag=%s, pwd=%luB, transport=%s://%s:%d, elapsed=%dms\n",
         whip->state, strlen(whip->sdp_offer), strlen(whip->sdp_answer), whip->ice_ufrag_remote, strlen(whip->ice_pwd_remote),
         whip->ice_protocol, whip->ice_host, whip->ice_port, ELAPSED(whip->whip_starttime, av_gettime()));
 
@@ -1181,9 +1182,9 @@ next_packet:
             if (whip->state < WHIP_STATE_ICE_CONNECTED) {
                 whip->state = WHIP_STATE_ICE_CONNECTED;
                 whip->whip_ice_time = av_gettime();
-                av_log(whip, AV_LOG_VERBOSE, "WHIP: ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%dms\n",
-                    whip->state, whip->ice_host, whip->ice_port, whip->whip_resource_url ? whip->whip_resource_url : "",
-                    whip->ice_ufrag_remote, whip->ice_ufrag_local, ret, ELAPSED(whip->whip_starttime, av_gettime()));
+                av_log(whip, AV_LOG_INFO, "WHIP: ICE STUN ok, state=%d, url=udp://%s:%d, username=%s:%s, res=%dB, elapsed=%dms\n",
+                    whip->state, whip->ice_host, whip->ice_port, whip->ice_ufrag_remote, whip->ice_ufrag_local,
+                    ret, ELAPSED(whip->whip_starttime, av_gettime()));
 
                 /* If got the first binding response, start DTLS handshake. */
                 if ((ret = dtls_context_start(whip->dtls_ctx)) < 0)
