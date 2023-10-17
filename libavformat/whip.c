@@ -23,6 +23,7 @@
 #include <openssl/err.h>
 
 #include "libavcodec/avcodec.h"
+#include "libavcodec/codec_desc.h"
 #include "libavcodec/h264.h"
 #include "libavcodec/startcode.h"
 #include "libavutil/base64.h"
