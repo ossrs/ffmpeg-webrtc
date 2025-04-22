@@ -23,6 +23,7 @@
 #include <openssl/err.h>
 
 #include "libavcodec/avcodec.h"
+#include "libavcodec/codec_desc.h"
 #include "libavcodec/h264.h"
 #include "libavcodec/startcode.h"
 #include "libavutil/base64.h"
@@ -32,9 +33,11 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/lfg.h"
 #include "libavutil/opt.h"
+#include "libavutil/mem.h"
 #include "libavutil/random_seed.h"
 #include "libavutil/time.h"
 #include "avc.h"
+#include "nal.h"
 #include "avio_internal.h"
 #include "http.h"
 #include "internal.h"
@@ -1270,7 +1273,7 @@ static int parse_profile_level(AVFormatContext *s, AVCodecParameters *par)
     if (par->codec_id != AV_CODEC_ID_H264)
         return ret;
 
-    if (par->profile != FF_PROFILE_UNKNOWN && par->level != FF_LEVEL_UNKNOWN)
+    if (par->profile != AV_PROFILE_UNKNOWN && par->level != AV_LEVEL_UNKNOWN)
         return ret;
 
     if (!par->extradata || par->extradata_size <= 0) {
@@ -1284,7 +1287,7 @@ static int parse_profile_level(AVFormatContext *s, AVCodecParameters *par)
         if (r >= end)
             break;
 
-        r1 = ff_avc_find_startcode(r, end);
+        r1 = ff_nal_find_startcode(r, end);
         if ((state & 0x1f) == H264_NAL_SPS) {
             ret = ff_avc_decode_sps(sps, r, r1 - r);
             if (ret < 0) {
@@ -1358,11 +1361,11 @@ static int parse_codec(AVFormatContext *s)
                 return AVERROR(EINVAL);
             }
 
-            if (par->profile == FF_PROFILE_UNKNOWN) {
+            if (par->profile == AV_PROFILE_UNKNOWN) {
                 av_log(whip, AV_LOG_WARNING, "WHIP: No profile found in extradata, consider baseline\n");
                 return AVERROR(EINVAL);
             }
-            if (par->level == FF_LEVEL_UNKNOWN) {
+            if (par->level == AV_LEVEL_UNKNOWN) {
                 av_log(whip, AV_LOG_WARNING, "WHIP: No level found in extradata, consider 3.1\n");
                 return AVERROR(EINVAL);
             }
@@ -1483,8 +1486,8 @@ static int generate_sdp_offer(AVFormatContext *s)
         level = whip->video_par->level;
         if (whip->video_par->codec_id == AV_CODEC_ID_H264) {
             vcodec_name = "H264";
-            profile_iop &= FF_PROFILE_H264_CONSTRAINED;
-            profile &= (~FF_PROFILE_H264_CONSTRAINED);
+            profile_iop &= AV_PROFILE_H264_CONSTRAINED;
+            profile &= (~AV_PROFILE_H264_CONSTRAINED);
         }
 
         av_bprintf(&bp, ""
@@ -2220,7 +2223,7 @@ end:
  * NRI of the first NALU. Additionally, it uses the corresponding SRTP context to encrypt
  * the RTP packet, where the video packet is handled by the video SRTP context.
  */
-static int on_rtp_write_packet(void *opaque, uint8_t *buf, int buf_size)
+static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
 {
     int ret, cipher_size, is_rtcp, is_video;
     uint8_t payload_type;
@@ -2459,9 +2462,9 @@ static int h264_annexb_insert_sps_pps(AVFormatContext *s, AVPacket *pkt)
 
     /* Discover NALU type from packet. */
     buf_end  = pkt->data + pkt->size;
-    for (buf = ff_avc_find_startcode(pkt->data, buf_end); buf < buf_end; buf += nal_size) {
+    for (buf = ff_nal_find_startcode(pkt->data, buf_end); buf < buf_end; buf += nal_size) {
         while (!*(buf++));
-        r1 = ff_avc_find_startcode(buf, buf_end);
+        r1 = ff_nal_find_startcode(buf, buf_end);
         if ((nal_size = r1 - buf) > 0) {
             unit_type = *buf & 0x1f;
             if (unit_type == H264_NAL_SPS) {
@@ -2502,9 +2505,9 @@ static int h264_annexb_insert_sps_pps(AVFormatContext *s, AVPacket *pkt)
     memcpy(pkt->data, par->extradata, par->extradata_size);
     out = pkt->data + par->extradata_size;
     buf_end  = in->data + in->size;
-    for (buf = ff_avc_find_startcode(in->data, buf_end); buf < buf_end; buf += nal_size) {
+    for (buf = ff_nal_find_startcode(in->data, buf_end); buf < buf_end; buf += nal_size) {
         while (!*(buf++));
-        r1 = ff_avc_find_startcode(buf, buf_end);
+        r1 = ff_nal_find_startcode(buf, buf_end);
         if ((nal_size = r1 - buf) > 0) {
             AV_WB24(out, 0x00001);
             memcpy(out + 3, buf, nal_size);
