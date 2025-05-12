@@ -69,7 +69,7 @@ typedef struct TLSShared {
     /* The fingerprint of certificate, used in SDP offer. */
     char *fingerprint;
 
-    /* The certificate and private key content used for DTLS hanshake */
+    /* The certificate and private key content used for DTLS handshake */
     char* cert_buf;
     char* key_buf;
     /**
