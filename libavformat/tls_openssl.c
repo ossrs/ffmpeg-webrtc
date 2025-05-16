@@ -754,75 +754,9 @@ static av_cold void init_bio_method(URLContext *h)
     SSL_set_bio(p->ssl, bio, bio);
 }
 
-/**
- * Callback function to print the OpenSSL SSL status.
- */
-static void openssl_dtls_on_info(const SSL *dtls, int where, int r0)
-{
-    int w, r1, is_fatal, is_warning, is_close_notify;
-    const char *method = "undefined", *alert_type, *alert_desc;
-    TLSContext *ctx = (TLSContext*)SSL_get_ex_data(dtls, 0);
-
-    w = where & ~SSL_ST_MASK;
-    if (w & SSL_ST_CONNECT) {
-        method = "SSL_connect";
-    } else if (w & SSL_ST_ACCEPT)
-        method = "SSL_accept";
-
-    r1 = SSL_get_error(ctx->ssl, r0);
-    if (where & SSL_CB_LOOP) {
-        av_log(ctx, AV_LOG_VERBOSE, "DTLS: Info method=%s state=%s(%s), where=%d, ret=%d, r1=%d\n",
-            method, SSL_state_string(dtls), SSL_state_string_long(dtls), where, r0, r1);
-    } else if (where & SSL_CB_ALERT) {
-        method = (where & SSL_CB_READ) ? "read":"write";
-
-        alert_type = SSL_alert_type_string_long(r0);
-        alert_desc = SSL_alert_desc_string(r0);
-
-        if (!av_strcasecmp(alert_type, "warning") && !av_strcasecmp(alert_desc, "CN")) {
-            av_log(ctx, AV_LOG_WARNING, "DTLS: SSL3 alert method=%s type=%s, desc=%s(%s), where=%d, ret=%d, r1=%d\n",
-                method, alert_type, alert_desc, SSL_alert_desc_string_long(r0), where, r0, r1);
-        } else
-            av_log(ctx, AV_LOG_ERROR, "DTLS: SSL3 alert method=%s type=%s, desc=%s(%s), where=%d, ret=%d, r1=%d %s\n",
-                method, alert_type, alert_desc, SSL_alert_desc_string_long(r0), where, r0, r1, ctx->error_message);
-
-        /**
-         * Notify the DTLS to handle the ALERT message, which maybe means media connection disconnect.
-         * CN(Close Notify) is sent when peer close the PeerConnection. fatal, IP(Illegal Parameter)
-         * is sent when DTLS failed.
-         */
-        is_fatal = !av_strncasecmp(alert_type, "fatal", 5);
-        is_warning = !av_strncasecmp(alert_type, "warning", 7);
-        is_close_notify = !av_strncasecmp(alert_desc, "CN", 2);
-        ctx->tls_shared.state = is_fatal ? DTLS_STATE_FAILED : (is_warning && is_close_notify ? DTLS_STATE_CLOSED : DTLS_STATE_NONE);
-        if (ctx->tls_shared.state != DTLS_STATE_NONE) {
-            av_log(ctx, AV_LOG_INFO, "DTLS: Notify ctx=%p, state=%d, fatal=%d, warning=%d, cn=%d\n",
-                ctx, ctx->tls_shared.state, is_fatal, is_warning, is_close_notify);
-        }
-    } else if (where & SSL_CB_EXIT) {
-        if (!r0) {
-            av_log(ctx, AV_LOG_WARNING, "DTLS: Fail method=%s state=%s(%s), where=%d, ret=%d, r1=%d\n",
-                method, SSL_state_string(dtls), SSL_state_string_long(dtls), where, r0, r1);
-        } else if (r0 < 0) {
-            if (r1 != SSL_ERROR_NONE && r1 != SSL_ERROR_WANT_READ && r1 != SSL_ERROR_WANT_WRITE) {
-                av_log(ctx, AV_LOG_ERROR, "DTLS: Error method=%s state=%s(%s), where=%d, ret=%d, r1=%d %s\n",
-                    method, SSL_state_string(dtls), SSL_state_string_long(dtls), where, r0, r1, ctx->error_message);
-            } else
-                av_log(ctx, AV_LOG_VERBOSE, "DTLS: Info method=%s state=%s(%s), where=%d, ret=%d, r1=%d\n",
-                    method, SSL_state_string(dtls), SSL_state_string_long(dtls), where, r0, r1);
-        }
-
-    }
-}
-
-static void tls_info_callback(const SSL *ssl, int where, int ret) {
-    const char *direction = "";
+static void openssl_info_callback(const SSL *ssl, int where, int ret) {
     const char *method = "undefined";
-    if (where & SSL_CB_READ) {
-        direction = "Received";
-    } else if (where & SSL_CB_WRITE) {
-        direction = "Sent";
-    }
+    TLSContext *ctx = (TLSContext*)SSL_get_ex_data(ssl, 0);
 
     if (where & SSL_ST_CONNECT) {
         method = "SSL_connect";
@@ -830,11 +764,11 @@ static void tls_info_callback(const SSL *ssl, int where, int ret) {
         method = "SSL_accept";
 
     if (where & SSL_CB_LOOP) {
-        av_log(NULL, AV_LOG_DEBUG, "TLS: Info method=%s state=%s(%s), where=%d, ret=%d\n",
+        av_log(ctx, AV_LOG_DEBUG, "Info method=%s state=%s(%s), where=%d, ret=%d\n",
                method, SSL_state_string(ssl), SSL_state_string_long(ssl), where, ret);
     } else if (where & SSL_CB_ALERT) {
         method = (where & SSL_CB_READ) ? "read":"write";
-        av_log(NULL, AV_LOG_DEBUG, "TLS: Alert method=%s state=%s(%s), where=%d, ret=%d\n",
+        av_log(ctx, AV_LOG_DEBUG, "Alert method=%s state=%s(%s), where=%d, ret=%d\n",
                method, SSL_state_string(ssl), SSL_state_string_long(ssl), where, ret);
     }
 }
@@ -1023,8 +957,7 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
 
     /* Setup the callback for logging. */
     SSL_set_ex_data(p->ssl, 0, p);
-    SSL_set_info_callback(p->ssl, openssl_dtls_on_info);
-
+    SSL_set_info_callback(p->ssl, openssl_info_callback);
     /**
      * We have set the MTU to fragment the DTLS packet. It is important to note that the
      * packet is split to ensure that each handshake packet is smaller than the MTU.
@@ -1115,7 +1048,6 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
         ret = AVERROR(EIO);
         goto fail;
     }
-    SSL_CTX_set_info_callback(p->ctx, tls_info_callback);
     SSL_CTX_set_options(p->ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
     ret = openssl_init_ca_key_cert(h);
     if (ret < 0) goto fail;
@@ -1129,6 +1061,8 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
         ret = AVERROR(EIO);
         goto fail;
     }
+    SSL_set_ex_data(p->ssl, 0, p);
+    SSL_CTX_set_info_callback(p->ctx, openssl_info_callback);
     init_bio_method(h);
     if (!c->listen && !c->numerichost)
         SSL_set_tlsext_host_name(p->ssl, c->host);
