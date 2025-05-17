@@ -250,7 +250,6 @@ typedef struct WHIPContext {
 
     /* These variables represent timestamps used for calculating and tracking the cost. */
     int64_t whip_starttime;
-    /*  */
     int64_t whip_init_time;
     int64_t whip_offer_time;
     int64_t whip_answer_time;
@@ -328,17 +327,19 @@ static av_cold int certificate_key_init(AVFormatContext *s)
 
     if (whip->cert_file && whip->key_file) {
         /* Read the private key and certificate from the file. */
-        if ((ret = ssl_read_key_cert(whip->key_file, whip->cert_file,
-                                     whip->key_buf, sizeof(whip->key_buf),
-                                     whip->cert_buf, sizeof(whip->cert_buf),
-                                     &whip->dtls_fingerprint)) < 0) {
+        if ((ret = ff_ssl_read_key_cert(whip->key_file, whip->cert_file,
+                                        whip->key_buf, sizeof(whip->key_buf),
+                                        whip->cert_buf, sizeof(whip->cert_buf),
+                                        &whip->dtls_fingerprint)) < 0) {
             av_log(s, AV_LOG_ERROR, "DTLS: Failed to read DTLS certificate from cert=%s, key=%s\n",
                 whip->cert_file, whip->key_file);
             return ret;
         }
     } else {
         /* Generate a private key to ctx->dtls_pkey and self-signed certificate. */
-        if ((ret = ssl_gen_key_cert(whip->key_buf, sizeof(whip->key_buf), whip->cert_buf, sizeof(whip->cert_buf), &whip->dtls_fingerprint)) < 0) {
+        if ((ret = ff_ssl_gen_key_cert(whip->key_buf, sizeof(whip->key_buf),
+                                       whip->cert_buf, sizeof(whip->cert_buf),
+                                       &whip->dtls_fingerprint)) < 0) {
             av_log(s, AV_LOG_ERROR, "DTLS: Failed to generate DTLS private key and certificate\n");
             return ret;
         }

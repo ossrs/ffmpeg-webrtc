@@ -97,7 +97,7 @@ typedef struct TLSShared {
 
 int ff_tls_open_underlying(TLSShared *c, URLContext *parent, const char *uri, AVDictionary **options);
 
-int url_read_all(const char *url, AVBPrint *bp);
+int ff_url_read_all(const char *url, AVBPrint *bp);
 
 int ff_dtls_set_udp(URLContext *h, URLContext *udp);
 
@@ -105,9 +105,9 @@ int ff_dtls_export_materials(URLContext *h, char *dtls_srtp_materials, size_t ma
 
 int ff_dtls_state(URLContext *h);
 
-int ssl_read_key_cert(char *key_url, char *cert_url, char *key_buf, size_t key_sz, char *cert_buf, size_t cert_sz, char **fingerprint);
+int ff_ssl_read_key_cert(char *key_url, char *cert_url, char *key_buf, size_t key_sz, char *cert_buf, size_t cert_sz, char **fingerprint);
 
-int ssl_gen_key_cert(char *key_buf, size_t key_sz, char *cert_buf, size_t cert_sz, char **fingerprint);
+int ff_ssl_gen_key_cert(char *key_buf, size_t key_sz, char *cert_buf, size_t cert_sz, char **fingerprint);
 
 void ff_gnutls_init(void);
 void ff_gnutls_deinit(void);
