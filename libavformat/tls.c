@@ -150,7 +150,7 @@ int ff_tls_open_underlying(TLSShared *c, URLContext *parent, const char *uri, AV
 /**
  * Read all data from the given URL url and store it in the given buffer bp.
  */
-int url_read_all(const char *url, AVBPrint *bp)
+int ff_url_read_all(const char *url, AVBPrint *bp)
 {
     int ret = 0;
     AVDictionary *opts = NULL;
