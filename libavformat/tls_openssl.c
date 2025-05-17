@@ -258,7 +258,7 @@ static int openssl_gen_private_key(EVP_PKEY **pkey, EC_KEY **eckey)
     *eckey = EC_KEY_new();
     ecgroup = EC_GROUP_new_by_curve_name(curve);
     if (!ecgroup) {
-        av_log(whip, AV_LOG_ERROR, "TLS: Create EC group by curve=%d failed, %s", curve, ERR_error_string(ERR_get_error(), NULL));
+        av_log(NULL, AV_LOG_ERROR, "TLS: Create EC group by curve=%d failed, %s", curve, ERR_error_string(ERR_get_error(), NULL));
         goto einval_end;
     }
 
@@ -968,7 +968,7 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
 
     if (p->tls_shared.use_external_udp != 1) {
         if ((ret = ff_tls_open_underlying(&p->tls_shared, h, url, options)) < 0) {
-            av_log(p, AV_LOG_ERROR, "WHIP: Failed to connect %s\n", url);
+            av_log(p, AV_LOG_ERROR, "Failed to connect %s\n", url);
             return ret;
         }
     }
