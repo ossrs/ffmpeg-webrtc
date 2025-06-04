@@ -467,6 +467,7 @@ typedef struct TLSContext {
     TLSShared tls_shared;
     SSL_CTX *ctx;
     SSL *ssl;
+    EVP_PKEY *pkey;
 #if OPENSSL_VERSION_NUMBER >= 0x1010000fL
     BIO_METHOD* url_bio_method;
 #endif
@@ -811,7 +812,7 @@ static av_cold int openssl_init_ca_key_cert(URLContext *h)
     int ret;
     TLSContext *p = h->priv_data;
     TLSShared *c = &p->tls_shared;
-    EVP_PKEY *pkey = NULL;
+    EVP_PKEY *pkey = p->pkey;
     X509 *cert = NULL;
     /* setup ca, private key, certificate */
     if (c->ca_file) {
@@ -876,6 +877,9 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
     int ret = 0;
     c->is_dtls = 1;
     const char* ciphers = "ALL";
+#if OPENSSL_VERSION_NUMBER < 0x10002000L // v1.0.2
+    EC_KEY *ec_key;
+#endif
     /**
      * The profile for OpenSSL's SRTP is SRTP_AES128_CM_SHA1_80, see ssl/d1_srtp.c.
      * The profile for FFmpeg's SRTP is SRTP_AES128_CM_HMAC_SHA1_80, see libavformat/srtp.c.
@@ -908,15 +912,6 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
     }
 #endif
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // v1.1.x
-#if OPENSSL_VERSION_NUMBER < 0x10002000L // v1.0.2
-    if (ctx->dtls_eckey)
-        SSL_CTX_set_tmp_ecdh(p->ctx, p->dtls_eckey);
-#else
-    SSL_CTX_set_ecdh_auto(p->ctx, 1);
-#endif
-#endif
-
     /**
      * We activate "ALL" cipher suites to align with the peer's capabilities,
      * ensuring maximum compatibility.
@@ -929,6 +924,17 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
     }
     ret = openssl_init_ca_key_cert(h);
     if (ret < 0) goto fail;
+
+#if OPENSSL_VERSION_NUMBER < 0x10100000L // v1.1.x
+#if OPENSSL_VERSION_NUMBER < 0x10002000L // v1.0.2
+    if (p->pkey)
+        ec_key = EVP_PKEY_get1_EC_KEY(p->pkey);
+    if (ec_key)
+        SSL_CTX_set_tmp_ecdh(p->ctx, ec_key);
+#else
+    SSL_CTX_set_ecdh_auto(p->ctx, 1);
+#endif
+#endif
 
     /* Server will send Certificate Request. */
     SSL_CTX_set_verify(p->ctx, SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE, openssl_dtls_verify_callback);
@@ -1015,9 +1021,7 @@ static av_cold int dtls_close(URLContext *h)
     av_freep(&ctx->tls_shared.fingerprint);
     av_freep(&ctx->tls_shared.cert_buf);
     av_freep(&ctx->tls_shared.key_buf);
-#if OPENSSL_VERSION_NUMBER < 0x30000000L /* OpenSSL 3.0 */
-    EC_KEY_free(ctx->dtls_eckey);
-#endif
+    EVP_PKEY_free(ctx->pkey);
     return 0;
 }
 
