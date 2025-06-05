@@ -26,6 +26,7 @@
 *.ptx
 *.ptx.c
 *.ptx.gz
+*.patch
 *_g
 \#*
 .\#*
