@@ -42,7 +42,7 @@
 #include "network.h"
 #include "srtp.h"
 #include "tls.h"
-
+#include <errno.h>
 /**
  * Maximum size limit of a Session Description Protocol (SDP),
  * be it an offer or answer.
@@ -144,6 +144,12 @@
 #define WHIP_RTCP_PT_END   223
 
 /**
+ * Consent-freshness constants �����������������������������������������
+ */
+#define WHIP_CONSENT_DEF_INTERVAL   15000   /* ms � RFC 7675 default */
+#define WHIP_CONSENT_MAX_FAILURES   3
+
+/**
  * In the case of ICE-LITE, these fields are not used; instead, they are defined
  * as constant values.
  */
@@ -156,9 +162,11 @@
 /* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
 enum STUNAttr {
     STUN_ATTR_USERNAME                  = 0x0006, /// shared secret response/bind request
+    STUN_ATTR_PRIORITY                  = 0x0024, /// ICE controlling/controlled
     STUN_ATTR_USE_CANDIDATE             = 0x0025, /// bind request
     STUN_ATTR_MESSAGE_INTEGRITY         = 0x0008, /// bind request/response
     STUN_ATTR_FINGERPRINT               = 0x8028, /// rfc5389
+    STUN_ATTR_ICE_CONTROLLING           = 0x802A, /// full agent talking to ice-lite
 };
 
 enum WHIPState {
@@ -303,6 +311,15 @@ typedef struct WHIPContext {
     /* The certificate and private key used for DTLS handshake. */
     char* cert_file;
     char* key_file;
+
+    /* Consent-freshness state */
+    int consent_interval;
+    int64_t last_consent_tx;
+    int consent_failures;
+
+    /* ICE-lite support */
+    int ice_lite_remote;
+    uint64_t  ice_tie_breaker;   /* random 64-bit, for ICE-CONTROLLING    */
 } WHIPContext;
 
 /**
@@ -411,6 +428,15 @@ static av_cold int initialize(AVFormatContext *s)
     /* Initialize the random number generator. */
     seed = av_get_random_seed();
     av_lfg_init(&whip->rnd, seed);
+
+    /* 64-bit tie-breaker for ICE-CONTROLLING (RFC 8445 6.1.1) */
+    whip->ice_tie_breaker = ((uint64_t)av_lfg_get(&whip->rnd) << 32) | (uint64_t)av_lfg_get(&whip->rnd);
+
+    /* Initialise consent-freshness timers */
+    if (whip->consent_interval <= 0)
+        whip->consent_interval = WHIP_CONSENT_DEF_INTERVAL;
+    whip->last_consent_tx = av_gettime();
+    whip->consent_failures = 0;
 
     if (whip->pkt_size < ideal_pkt_size)
         av_log(whip, AV_LOG_WARNING, "WHIP: pkt_size=%d(<%d) is too small, may cause packet loss\n",
@@ -894,6 +920,8 @@ static int parse_answer(AVFormatContext *s)
                     goto end;
                 }
             }
+        } else if (av_strstart(line, "a=ice-lite", NULL)) {
+            whip->ice_lite_remote = 1;
         }
     }
 
@@ -984,6 +1012,22 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     /* Write the use-candidate attribute */
     avio_wb16(pb, STUN_ATTR_USE_CANDIDATE); /* attribute type use-candidate */
     avio_wb16(pb, 0); /* size of use-candidate */
+
+    /**
+     * For ICE-lite peers we are *always* the controlling agent (RFC 8445 6.1.3.1).
+     * Add PRIORITY + ICE-CONTROLLING attributes.
+     */
+     if (whip->ice_lite_remote) {
+        /* we are controlling, use host-candidate priority 126 << 24 | 65535 << 8 | 255 = 2130706431 */
+        avio_wb16(pb, STUN_ATTR_PRIORITY);
+        avio_wb16(pb, 4);
+        avio_wb32(pb, 2130706431);
+      
+        avio_wb16(pb, STUN_ATTR_ICE_CONTROLLING);
+        avio_wb16(pb, 8);
+        avio_wb32(pb, (uint32_t)(whip->ice_tie_breaker >> 32));
+        avio_wb32(pb, (uint32_t)(whip->ice_tie_breaker & 0xffffffff));
+    }
 
     /* Build and update message integrity */
     avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
@@ -1775,7 +1819,16 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
     AVStream *st = s->streams[pkt->stream_index];
     AVFormatContext *rtp_ctx = st->priv_data;
 
-    /* TODO: Send binding request every 1s as WebRTC heartbeat. */
+    /* Periodic consent-freshness STUN Binding Request   */
+    int64_t now = av_gettime();
+    if (now - whip->last_consent_tx >= (int64_t)whip->consent_interval * 1000) {
+        int req_sz;
+        if (ice_create_request(s, whip->buf, sizeof(whip->buf), &req_sz) >= 0 && ffurl_write(whip->udp, whip->buf, req_sz) == req_sz) {
+            whip->consent_failures++;
+            whip->last_consent_tx = now;
+            av_log(whip, AV_LOG_VERBOSE, "WHIP: consent-freshness request %d sent\n", whip->consent_failures);
+        }
+    }
 
     /**
      * Receive packets from the server such as ICE binding requests, DTLS messages,
@@ -1783,6 +1836,10 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
      */
     ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
     if (ret > 0) {
+        if (ice_is_binding_response(whip->buf, ret)) {
+            whip->consent_failures = 0;
+            av_log(whip, AV_LOG_VERBOSE, "WHIP: consent-freshness response received, counter reset\n");
+        }
         if (is_dtls_packet(whip->buf, ret)) {
             if ((ret = ffurl_write(whip->dtls_uc, whip->buf, ret)) < 0) {
                 av_log(whip, AV_LOG_ERROR, "WHIP: Failed to handle DTLS message\n");
@@ -1791,6 +1848,12 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
         }
     } else if (ret != AVERROR(EAGAIN)) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to read from UDP socket\n");
+        goto end;
+    }
+    /* Check consent freshness consecutive failures */
+    if (whip->consent_failures >= WHIP_CONSENT_MAX_FAILURES) {
+        av_log(whip, AV_LOG_ERROR, "WHIP: No consent-freshness response after %d attempts, closing\n", WHIP_CONSENT_MAX_FAILURES);
+        ret = AVERROR(EHOSTUNREACH);
         goto end;
     }
 
@@ -1891,7 +1954,8 @@ static const AVOption options[] = {
     { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, DEC },
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
-    { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
+    { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),           AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
+    { "consent_interval",   "STUN consent refresh interval in ms (RFC 7675)",           OFFSET(consent_interval),   AV_OPT_TYPE_INT,    { .i64 = WHIP_CONSENT_DEF_INTERVAL }, 5000, 30000, DEC },
     { NULL },
 };
 
