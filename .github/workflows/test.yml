@@ -1,0 +1,414 @@
+name: "Test"
+
+on: 
+  push:
+  pull_request:
+
+permissions: read-all
+
+# Results for commonly used commands:
+#     $(pwd) is /home/runner/work/ffmpeg-webrtc/ffmpeg-webrtc
+#     $(nproc) is 4
+#     $(whoami) is runner
+#     $(id -gn) is docker
+#     $(which docker) is /usr/bin/docker
+#     $(ifconfig eth0 | grep 'inet ' | awk '{print $2}') is private IP4 address like 10.1.0.76
+jobs:
+  build:
+    name: "Build FFmpeg"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config libssl-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+    runs-on: ubuntu-22.04
+
+  fate:
+    name: "FFmpeg Fate Test"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # The cache for FFmpeg FATE samples can help decrease the resync time when executing 
+        # "make fate-resync." The cache is stored in the Docker image "ossrs/srs:ffmpeg-fate," 
+        # which can be refreshed by manually executing the below workflow.
+        #   https://github.com/ossrs/ffmpeg-webrtc/actions/workflows/fate-cache.yml
+      - name: Download Fate Cache Samples
+        run: |
+          set -euxo pipefail
+
+          docker run --rm -v $(pwd):/target ossrs/srs:ffmpeg-fate \
+            bash -c "cp /opt/ffmpeg/fate-suite.tar /target/"
+          tar xf fate-suite.tar
+
+          ls -ldh fate-suite
+          du -sh fate-suite
+      - name: Configure FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config libssl-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --extra-cflags='-fsanitize=address -g -O0' --extra-cxxflags='-fsanitize=address -g -O0' --extra-ldflags='-fsanitize=address -g -O0'
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: FFmpeg Fate rsync
+        run: |
+          set -euxo pipefail
+          make fate-rsync SAMPLES=$(pwd)/fate-suite
+      - name: Stat Fate Suite
+        run: |
+          set -euxo pipefail
+          du -sh fate-suite
+          du -sh *
+      - name: Run FFmpeg Fate
+        run: |
+          set -euxo pipefail
+          make fate -j$(nproc) SAMPLES=$(pwd)/fate-suite
+    runs-on: ubuntu-22.04
+
+  srs:
+    name: "FFmpeg with SRS"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq libssl-dev libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --enable-libx264 --enable-gpl --enable-libopus
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Test FFmpeg with SRS
+        run: |
+          set -euxo pipefail
+
+          # Publish a test stream to SRS using the whip muxer
+          nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+            -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            >/dev/null 2>&1 &
+          
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            sleep 3
+          done
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            exit 1
+          fi
+    runs-on: ubuntu-22.04
+
+  openssl-1-0-1k:
+    name: "With OpenSSL 1.0.1k"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build OpenSSL 1.0.1k
+        run: |
+          set -euxo pipefail
+          curl -s -L https://www.openssl.org/source/openssl-1.0.1k.tar.gz | tar xz
+          cd openssl-1.0.1k && ./config && make -j1 && sudo make install_sw
+      - name: Download Test File
+        run: |
+          set -euxo pipefail
+          curl -s -L -O https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Test FFmpeg with SRS
+        run: |
+          set -euxo pipefail
+
+          # Publish a test stream to SRS using the whip muxer
+          nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            >/dev/null 2>&1 &
+
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            sleep 3
+          done
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            exit 1
+          fi
+    runs-on: ubuntu-22.04
+
+  openssl-1-0-2:
+    name: "With OpenSSL 1.0.2"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build OpenSSL 1.0.2
+        run: |
+          set -euxo pipefail
+          curl -s -L https://www.openssl.org/source/openssl-1.0.2.tar.gz | tar xz
+          cd openssl-1.0.2 && ./config && make -j1 && sudo make install_sw
+      - name: Download Test File
+        run: |
+          set -euxo pipefail
+          curl -s -L -O https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Test FFmpeg with SRS
+        run: |
+          set -euxo pipefail
+
+          # Publish a test stream to SRS using the whip muxer
+          nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            >/dev/null 2>&1 &
+          
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            sleep 3
+          done
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            exit 1
+          fi
+    runs-on: ubuntu-22.04
+
+  openssl-1-1-0h:
+    name: "With OpenSSL 1.1.0h"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build OpenSSL 1.1.0h
+        run: |
+          set -euxo pipefail
+          curl -s -L https://www.openssl.org/source/openssl-1.1.0h.tar.gz | tar xz
+          cd openssl-1.1.0h && ./config && make -j$(nproc) && sudo make install_sw
+      - name: Download Test File
+        run: |
+          set -euxo pipefail
+          curl -s -L -O https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Test FFmpeg with SRS
+        run: |
+          set -euxo pipefail
+
+          # Publish a test stream to SRS using the whip muxer
+          nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            >/dev/null 2>&1 &
+          
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            sleep 3
+          done
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            exit 1
+          fi
+    runs-on: ubuntu-22.04
+
+  openssl-3-0:
+    name: "With OpenSSL 3.0"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build OpenSSL 3.0
+        run: |
+          set -euxo pipefail
+          curl -s -L https://www.openssl.org/source/openssl-3.0.0.tar.gz | tar xz
+          cd openssl-3.0.0 && ./config && make -j$(nproc) && sudo make install_sw
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --enable-libx264 --enable-gpl --enable-libopus
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Test FFmpeg with SRS
+        run: |
+          set -euxo pipefail
+
+          # Publish a test stream to SRS using the whip muxer
+          nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+            -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            >/dev/null 2>&1 &
+
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            sleep 3
+          done
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            exit 1
+          fi
+    runs-on: ubuntu-22.04
+
+  openssl-latest:
+    name: "With OpenSSL latest"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build OpenSSL latest
+        run: |
+          set -euxo pipefail
+          curl -s -L https://www.openssl.org/source/openssl-3.5.0.tar.gz | tar xz
+          cd openssl-3.5.0 && ./config && make -j$(nproc) && sudo make install_sw
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --enable-libx264 --enable-gpl --enable-libopus
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Test FFmpeg with SRS
+        run: |
+          set -euxo pipefail
+
+          # Publish a test stream to SRS using the whip muxer
+          nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+            -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            >/dev/null 2>&1 &
+          
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            sleep 3
+          done
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            exit 1
+          fi
+    runs-on: ubuntu-22.04
+
+  test-done:
+    needs:
+      - fate
+      - srs
+      - openssl-1-0-1k
+      - openssl-1-0-2
+      - openssl-1-1-0h
+      - openssl-3-0
+      - openssl-latest
+    steps:
+      - run: echo 'All done'
+    runs-on: ubuntu-22.04
+
