@@ -114,6 +114,7 @@
 /* Referring to Chrome's definition of RTP payload types. */
 #define WHIP_RTP_PAYLOAD_TYPE_H264 106
 #define WHIP_RTP_PAYLOAD_TYPE_OPUS 111
+#define WHIP_RTP_PAYLOAD_TYPE_RTX  105
 
 /**
  * The STUN message header, which is 20 bytes long, comprises the
@@ -155,6 +156,11 @@
  */
 #define WHIP_SDP_SESSION_ID "4489045141692799359"
 #define WHIP_SDP_CREATOR_IP "127.0.0.1"
+
+/** 
+ * Retransmission / NACK support
+*/
+#define HISTORY_SIZE_DEFAULT 512
 
 /* Calculate the elapsed time from starttime to endtime in milliseconds. */
 #define ELAPSED(starttime, endtime) ((int)(endtime - starttime) / 1000)
@@ -200,6 +206,15 @@ enum WHIPState {
     /* The muxer is failed. */
     WHIP_STATE_FAILED,
 };
+
+typedef struct RtpHistoryItem {
+        /* original RTP seq */
+        uint16_t seq;            
+        /* length in bytes */
+        int size;           
+        /* malloc-ed copy */
+        uint8_t* pkt;
+} RtpHistoryItem;
 
 typedef struct WHIPContext {
     AVClass *av_class;
@@ -320,6 +335,16 @@ typedef struct WHIPContext {
     /* ICE-lite support */
     int ice_lite_remote;
     uint64_t  ice_tie_breaker;   /* random 64-bit, for ICE-CONTROLLING    */
+
+    /* RTX / NACK */
+    uint8_t rtx_payload_type;
+    uint32_t video_rtx_ssrc;
+    uint16_t rtx_seq;
+    int  history_size;
+    RtpHistoryItem * history;  /* ring buffer  */
+    int hist_head;
+    int enable_nack_rtx;
+
 } WHIPContext;
 
 /**
@@ -641,6 +666,17 @@ static int generate_sdp_offer(AVFormatContext *s)
     whip->audio_payload_type = WHIP_RTP_PAYLOAD_TYPE_OPUS;
     whip->video_payload_type = WHIP_RTP_PAYLOAD_TYPE_H264;
 
+    /* RTX / NACK init */
+    whip->rtx_payload_type = WHIP_RTP_PAYLOAD_TYPE_RTX;
+    whip->video_rtx_ssrc = av_lfg_get(&whip->rnd);
+    whip->rtx_seq = 0;
+    whip->hist_head = 0;
+    whip->history_size = FFMAX(64, whip->history_size);
+    whip->history = av_calloc(whip->history_size, sizeof(*whip->history));
+    if (!whip->history)
+            return AVERROR(ENOMEM);
+    whip->enable_nack_rtx = 1;
+
     av_bprintf(&bp, ""
         "v=0\r\n"
         "o=FFmpeg %s 2 IN IP4 %s\r\n"
@@ -705,8 +741,14 @@ static int generate_sdp_offer(AVFormatContext *s)
             "a=rtcp-rsize\r\n"
             "a=rtpmap:%u %s/90000\r\n"
             "a=fmtp:%u level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=%02x%02x%02x\r\n"
+            "a=rtcp-fb:%u nack\r\n"
+            "a=rtpmap:%u rtx/90000\r\n"
+            "a=fmtp:%u apt=%u\r\n"
             "a=ssrc:%u cname:FFmpeg\r\n"
-            "a=ssrc:%u msid:FFmpeg video\r\n",
+            "a=ssrc:%u msid:FFmpeg video\r\n"
+            "a=ssrc:%u cname:FFmpeg\r\n"
+            "a=ssrc:%u msid:FFmpeg video\r\n"
+            "a=ssrc-group:FID %u %u\r\n",
             whip->video_payload_type,
             whip->ice_ufrag_local,
             whip->ice_pwd_local,
@@ -717,8 +759,16 @@ static int generate_sdp_offer(AVFormatContext *s)
             profile,
             profile_iop,
             level,
+            whip->video_payload_type,
+            whip->rtx_payload_type,
+            whip->rtx_payload_type,
+            whip->video_payload_type,
             whip->video_ssrc,
-            whip->video_ssrc);
+            whip->video_ssrc,
+            whip->video_rtx_ssrc,
+            whip->video_rtx_ssrc,
+            whip->video_ssrc,
+            whip->video_rtx_ssrc);
     }
 
     if (!av_bprint_is_complete(&bp)) {
@@ -1465,6 +1515,37 @@ end:
     return ret;
 }
 
+
+/**
+ * RTX history helpers
+ */
+ static void rtp_history_store(WHIPContext *whip, const uint8_t *pkt, int size)
+{
+    int pos = whip->hist_head % whip->history_size;
+    RtpHistoryItem * it = &whip->history[pos];
+    /* free older entry */
+    av_free(it->pkt);   
+    it->pkt = av_malloc(size);
+    if (!it->pkt)
+        return;
+
+    memcpy(it->pkt, pkt, size);
+    it->size = size;
+    it->seq = AV_RB16(pkt + 2);
+
+    whip->hist_head++;
+}
+
+static const RtpHistoryItem* rtp_history_find(const WHIPContext *whip, uint16_t seq)
+{
+    for (int i = 0; i < whip->history_size; i++) {
+        const RtpHistoryItem * it = &whip->history[i];
+        if (it->pkt && it->seq == seq)
+            return it;
+    }
+    return NULL;
+}
+
 /**
  * Callback triggered by the RTP muxer when it creates and sends out an RTP packet.
  *
@@ -1501,6 +1582,10 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
         return 0;
     }
 
+    /* Store only ORIGINAL video packets (non-RTX, non-RTCP) */
+    if (!is_rtcp && is_video)
+        rtp_history_store(whip, buf, buf_size);
+
     ret = ffurl_write(whip->udp, whip->buf, cipher_size);
     if (ret < 0) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to write packet=%dB, ret=%d\n", cipher_size, ret);
@@ -1508,6 +1593,45 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
     }
 
     return ret;
+}
+/** 
+ * Build and send a single RTX packet
+*/
+static int send_rtx_packet(AVFormatContext *s, const uint8_t * orig_pkt, int orig_size)
+{
+    WHIPContext * whip = s->priv_data;
+    int new_size, cipher_size;
+    /* skip if no RTX PT configured */
+    if (!whip->enable_nack_rtx)
+        return 0;
+
+    /* allocate new buffer: header + 2 + payload */
+    if (orig_size + 2 > sizeof(whip->buf))
+        return 0;
+
+    memcpy(whip->buf, orig_pkt, orig_size);
+
+    uint8_t * hdr = whip->buf;
+    uint16_t orig_seq = AV_RB16(hdr + 2);
+
+    /* rewrite header */
+    hdr[1] = (hdr[1] & 0x80) | whip->rtx_payload_type; /* keep M bit */
+    AV_WB16(hdr + 2, whip->rtx_seq++);
+    AV_WB32(hdr + 8, whip->video_rtx_ssrc);
+
+    /* shift payload 2 bytes */
+    memmove(hdr + 12 + 2, hdr + 12, orig_size - 12);
+    AV_WB16(hdr + 12, orig_seq);
+
+    new_size = orig_size + 2;
+
+    /* Encrypt by SRTP and send out. */
+    cipher_size = ff_srtp_encrypt(&whip->srtp_video_send, whip->buf, new_size, whip->buf, sizeof(whip->buf));
+    if (cipher_size <= 0 || cipher_size < new_size) {
+        av_log(whip, AV_LOG_WARNING, "WHIP: Failed to encrypt packet=%dB, cipher=%dB\n", new_size, cipher_size);
+        return 0;
+    }
+    return ffurl_write(whip->udp, whip->buf, cipher_size);
 }
 
 /**
@@ -1846,6 +1970,38 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                 goto end;
             }
         }
+        /* Handle RTCP NACK ( RTPFB / FMT=1 ) -------------- */
+        if (media_is_rtcp(whip->buf, ret)) {
+            int ptr = 0;
+            while (ptr + 4 <= ret) {
+                uint8_t pt = whip->buf[ptr + 1];
+                int len = (AV_RB16(&whip->buf[ptr + 2]) + 1) * 4;
+                if (ptr + len > ret) break;
+
+                if (pt == 205) { /* RTPFB */
+                    uint8_t fmt = (whip->buf[ptr] & 0x1f);
+                    if (fmt == 1 && len >= 12) {
+                        uint16_t pid = AV_RB16(&whip->buf[ptr + 12 - 4]);
+                        uint16_t blp = AV_RB16(&whip->buf[ptr + 14 - 4]);
+
+                        /* retransmit pid + any bit set in blp */
+                        for (int bit = -1; bit < 16; bit++) {
+                            uint16_t seq = (bit < 0) ? pid : pid + bit + 1;
+                            if (bit >= 0 && !(blp & (1 << bit)))
+                                continue;
+
+                        const RtpHistoryItem * it = rtp_history_find(whip, seq);
+                        if (it)
+                            send_rtx_packet(s, it->pkt, it->size);
+
+                        }
+                    }
+
+                }
+                ptr += len;
+            }
+
+        }
     } else if (ret != AVERROR(EAGAIN)) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to read from UDP socket\n");
         goto end;
@@ -1956,6 +2112,7 @@ static const AVOption options[] = {
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),           AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
     { "consent_interval",   "STUN consent refresh interval in ms (RFC 7675)",           OFFSET(consent_interval),   AV_OPT_TYPE_INT,    { .i64 = WHIP_CONSENT_DEF_INTERVAL }, 5000, 30000, DEC },
+    { "rtx_history",        "Packet history size",                                      OFFSET(history_size),       AV_OPT_TYPE_INT,    { .i64 = HISTORY_SIZE_DEFAULT },      64,   2048,  DEC },
     { NULL },
 };
 
