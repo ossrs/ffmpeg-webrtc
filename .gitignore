@@ -56,3 +56,4 @@
 /libavfilter/vulkan/*.c
 /.*/
 !/.forgejo/
+/fate-suite
