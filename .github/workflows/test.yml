@@ -322,12 +322,11 @@ jobs:
             ret=1
           done
           exit $ret
-      - name: Check Asan Log
+      - name: Check FFmpeg Exit Log
         run: |
           set -euxo pipefail
-          cat ffstderr.log |grep 'ERROR: AddressSanitizer' && 
-            echo "AddressSanitizer error found in ffstderr.log" && exit 1
-          echo "AddressSanitizer is ok"
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-0-1k:
