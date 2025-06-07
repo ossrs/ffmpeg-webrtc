@@ -189,6 +189,11 @@ jobs:
             exit 1
           fi
 
+          # TEST: Generate a coredump.
+          pkill -SIGSEGV ffmpeg
+          sleep 3
+          exit 0
+
           # Stop FFmpeg normally.
           pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log

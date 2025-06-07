@@ -398,7 +398,7 @@ static av_cold int initialize(AVFormatContext *s)
 {
     int ret, ideal_pkt_size = 532;
     WHIPContext *whip = s->priv_data;
-    uint32_t seed; int *ptr = NULL; *ptr = 0xf; printf("No coredump!\n");
+    uint32_t seed; // int *ptr = NULL; *ptr = 0xf; printf("No coredump!\n");
 
     whip->whip_starttime = av_gettime();
 
