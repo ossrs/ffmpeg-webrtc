@@ -129,7 +129,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill ffmpeg
+          pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -190,7 +190,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill ffmpeg
+          pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -201,10 +201,15 @@ jobs:
           cat ffstderr.log |grep 'ERROR: AddressSanitizer' && 
             echo "AddressSanitizer error found in ffstderr.log" && exit 1
           echo "AddressSanitizer is ok"
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
     runs-on: ubuntu-22.04
 
   coredump:
-    name: "FFmpeg with Coredump"
+    name: "FFmpeg check Coredump"
     #needs: build
     steps:
       - name: Checkout repository
@@ -220,6 +225,8 @@ jobs:
           sudo mkdir /cores
           sudo chmod 777 /cores
           sudo bash -c 'echo "/cores/core.%e.%p.%t" > /proc/sys/kernel/core_pattern'
+      # Edit the whip.c to generate coredump:
+      #   sed -i 's/uint32_t seed;.*/uint32_t seed; int *ptr = NULL; *ptr = 0xf; printf("No coredump!\\n");/g' ./libavformat/whip.c
       - name: Build FFmpeg
         run: |
           set -euxo pipefail
@@ -231,7 +238,7 @@ jobs:
           # Build FFmpeg with WebRTC support
           ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
             --enable-libx264 --enable-gpl --enable-libopus \
-            --extra-cflags='-fsanitize=address -g -O0' --extra-cxxflags='-fsanitize=address -g -O0' --extra-ldflags='-fsanitize=address -g -O0'
+            --extra-cflags='-g -O0' --extra-cxxflags='-g -O0' --extra-ldflags='-g -O0'
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -267,12 +274,12 @@ jobs:
           fi
 
           # TEST: Generate a coredump.
-          pkill -SIGSEGV ffmpeg
-          sleep 3
-          exit 0
+          #pkill -SIGSEGV ffmpeg
+          #sleep 3
+          #exit 0
 
           # Stop FFmpeg normally.
-          pkill ffmpeg
+          pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -381,7 +388,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill ffmpeg
+          pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -451,7 +458,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill ffmpeg
+          pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -521,7 +528,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill ffmpeg
+          pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -589,7 +596,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill ffmpeg
+          pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -657,7 +664,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill ffmpeg
+          pkill -SIGINT ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
