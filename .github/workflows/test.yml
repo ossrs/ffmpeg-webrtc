@@ -129,7 +129,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill -SIGINT ffmpeg
+          pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -190,12 +190,12 @@ jobs:
           fi
 
           # TEST: Generate a coredump.
-          pkill -SIGSEGV ffmpeg
-          sleep 3
-          exit 0
+          #pkill -SIGSEGV ffmpeg
+          #sleep 3
+          #exit 0
 
           # Stop FFmpeg normally.
-          pkill -SIGINT ffmpeg
+          pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -279,12 +279,12 @@ jobs:
           fi
 
           # TEST: Generate a coredump.
-          pkill -SIGSEGV ffmpeg
-          sleep 3
-          exit 0
+          #pkill -SIGSEGV ffmpeg
+          #sleep 3
+          #exit 0
 
           # Stop FFmpeg normally.
-          pkill -SIGINT ffmpeg
+          pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -392,7 +392,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill -SIGINT ffmpeg
+          pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -462,7 +462,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill -SIGINT ffmpeg
+          pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -532,7 +532,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill -SIGINT ffmpeg
+          pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -600,7 +600,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill -SIGINT ffmpeg
+          pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -668,7 +668,7 @@ jobs:
           fi
 
           # Stop FFmpeg normally.
-          pkill -SIGINT ffmpeg
+          pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
