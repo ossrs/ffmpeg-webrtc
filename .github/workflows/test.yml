@@ -138,6 +138,7 @@ jobs:
       - name: Setup Coredump
         run: |
           set -euxo pipefail
+          sudo apt-get update
           sudo apt-get install -y gdb
           ulimit -c unlimited
           echo '/tmp/core.%e.%p' | sudo tee /proc/sys/kernel/core_pattern
