@@ -27,16 +27,16 @@ PR_URL="https://github.com/ossrs/ffmpeg-webrtc/pull/$PR_NUMBER"
 echo "Fetching PR #$PR_NUMBER from $PR_URL"
 
 PR_DATA=$(curl -s "https://api.github.com/repos/ossrs/ffmpeg-webrtc/pulls/$PR_NUMBER")
-REPO_NAME=$(echo "$PR_DATA" | jq -r '.head.repo.full_name')
-BRANCH_NAME=$(echo "$PR_DATA" | jq -r '.head.ref')
+REPO_NAME=$(printf '%s' "$PR_DATA" | jq -r '.head.repo.full_name')
+BRANCH_NAME=$(printf '%s' "$PR_DATA" | jq -r '.head.ref')
 if [[ -z "$REPO_NAME" || -z "$BRANCH_NAME" ]]; then 
   echo "Error: REPO_NAME or BRANCH_NAME is empty!"
   exit 1
 fi
 echo "Repository: $REPO_NAME, Branch: $BRANCH_NAME"
 
-PR_TITLE=$(echo "$PR_DATA" | jq -r '.title')
-PR_DESCRIPTION=$(echo "$PR_DATA" | jq -r '.body // ""')
+PR_TITLE=$(printf '%s' "$PR_DATA" | jq -r '.title')
+PR_DESCRIPTION=$(printf '%s' "$PR_DATA" | jq -r '.body // ""')
 if [[ -z "$PR_TITLE" ]]; then
   echo "Error: PR title is empty!"
   exit 1
