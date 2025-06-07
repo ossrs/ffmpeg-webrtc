@@ -97,9 +97,16 @@ jobs:
 
           # Build FFmpeg with WebRTC support
           ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
-            --enable-libx264 --enable-gpl --enable-libopus
+            --enable-libx264 --enable-gpl --enable-libopus \
+            --extra-cflags='-fsanitize=address -g -O0' --extra-cxxflags='-fsanitize=address -g -O0' --extra-ldflags='-fsanitize=address -g -O0'
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Setup Coredump
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y gdb
+          ulimit -c unlimited
+          echo '/tmp/core.%e.%p' | sudo tee /proc/sys/kernel/core_pattern
       - name: Start SRS Docker container
         run: |
           set -euxo pipefail
@@ -115,7 +122,7 @@ jobs:
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            >ffstdout.log 2>ffstderr.log &
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -127,6 +134,20 @@ jobs:
             echo "Stream not found: $STREAM"
             exit 1
           fi
+
+          # TEST: Generate a coredump.
+          pkill -SIGSEGV ffmpeg
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Find core dumps
+        run: |
+          for core in /tmp/core.*; do
+            echo "Core dump found: $core"
+            gdb -q -c "$core" -ex "bt" -ex "quit"
+            exit 1
+          done
     runs-on: ubuntu-22.04
 
   openssl-1-0-1k:
