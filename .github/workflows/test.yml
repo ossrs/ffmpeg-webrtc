@@ -108,6 +108,7 @@ jobs:
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
       - name: Test FFmpeg with SRS
+        id: streaming
         run: |
           set -euxo pipefail
 
@@ -120,12 +121,16 @@ jobs:
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
 
           # Stop FFmpeg normally.
@@ -139,6 +144,9 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   asan:
@@ -169,6 +177,7 @@ jobs:
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
       - name: Test FFmpeg with SRS
+        id: streaming
         run: |
           set -euxo pipefail
 
@@ -181,12 +190,16 @@ jobs:
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
 
           # TEST: Generate a coredump.
@@ -211,6 +224,9 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   coredump:
@@ -254,6 +270,7 @@ jobs:
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
       - name: Test FFmpeg with SRS
+        id: streaming
         run: |
           set -euxo pipefail
 
@@ -270,12 +287,16 @@ jobs:
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
 
           # TEST: Generate a coredump.
@@ -332,6 +353,9 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-0-1k:
@@ -372,6 +396,7 @@ jobs:
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
       - name: Test FFmpeg with SRS
+        id: streaming
         run: |
           set -euxo pipefail
 
@@ -383,12 +408,16 @@ jobs:
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
 
           # Stop FFmpeg normally.
@@ -402,6 +431,9 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-0-2:
@@ -442,6 +474,7 @@ jobs:
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
       - name: Test FFmpeg with SRS
+        id: streaming
         run: |
           set -euxo pipefail
 
@@ -453,12 +486,16 @@ jobs:
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
 
           # Stop FFmpeg normally.
@@ -472,6 +509,9 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-1-0h:
@@ -512,6 +552,7 @@ jobs:
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
       - name: Test FFmpeg with SRS
+        id: streaming
         run: |
           set -euxo pipefail
 
@@ -523,12 +564,16 @@ jobs:
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
 
           # Stop FFmpeg normally.
@@ -542,6 +587,9 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-3-0:
@@ -579,6 +627,7 @@ jobs:
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
       - name: Test FFmpeg with SRS
+        id: streaming
         run: |
           set -euxo pipefail
 
@@ -591,12 +640,16 @@ jobs:
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
 
           # Stop FFmpeg normally.
@@ -610,6 +663,9 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-latest:
@@ -647,6 +703,7 @@ jobs:
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
       - name: Test FFmpeg with SRS
+        id: streaming
         run: |
           set -euxo pipefail
 
@@ -659,12 +716,16 @@ jobs:
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
 
           # Stop FFmpeg normally.
@@ -678,6 +739,9 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   test-done:
