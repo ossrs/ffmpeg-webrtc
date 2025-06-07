@@ -7,6 +7,7 @@ on:
 permissions: read-all
 
 # Results for commonly used commands:
+#     $HOME is /home/runner
 #     $(pwd) is /home/runner/work/ffmpeg-webrtc/ffmpeg-webrtc
 #     $(nproc) is 4
 #     $(whoami) is runner
@@ -106,26 +107,129 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
+    runs-on: ubuntu-22.04
+
+  asan:
+    name: "FFmpeg with Asan"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq libssl-dev libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --enable-libx264 --enable-gpl --enable-libopus \
+            --extra-cflags='-fsanitize=address -g -O0' --extra-cxxflags='-fsanitize=address -g -O0' --extra-ldflags='-fsanitize=address -g -O0'
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Streaming with FFmpeg
+        run: |
+          set -euxo pipefail
+          nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+            -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
+          
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
+            sleep 3
+          done
+
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            echo "has_stream=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Stop FFmpeg normally
+        run: |
+          # TEST: Generate a coredump.
+          #pkill -SIGSEGV ffmpeg && sleep 3 && exit 0
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check Asan Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'ERROR: AddressSanitizer' && 
+            echo "AddressSanitizer error found in ffstderr.log" && exit 1
+          echo "AddressSanitizer is ok"
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-0-1k:
@@ -138,7 +242,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-1.0.1k.tar.gz | tar xz
-          cd openssl-1.0.1k && ./config && make -j1 && sudo make install_sw
+          cd openssl-1.0.1k
+          ./config --prefix=$HOME/.release/openssl && make -j1
+          sudo make install_sw
       - name: Download Test File
         run: |
           set -euxo pipefail
@@ -152,7 +258,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -162,25 +269,48 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
 
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-0-2:
@@ -193,7 +323,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-1.0.2.tar.gz | tar xz
-          cd openssl-1.0.2 && ./config && make -j1 && sudo make install_sw
+          cd openssl-1.0.2 
+          ./config --prefix=$HOME/.release/openssl
+          make -j1 && sudo make install_sw
       - name: Download Test File
         run: |
           set -euxo pipefail
@@ -207,7 +339,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -217,25 +350,48 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-1-0h:
@@ -248,7 +404,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-1.1.0h.tar.gz | tar xz
-          cd openssl-1.1.0h && ./config && make -j$(nproc) && sudo make install_sw
+          cd openssl-1.1.0h 
+          ./config --prefix=$HOME/.release/openssl
+          make -j$(nproc) && sudo make install_sw
       - name: Download Test File
         run: |
           set -euxo pipefail
@@ -262,7 +420,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -272,25 +431,48 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-3-0:
@@ -303,7 +485,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-3.0.0.tar.gz | tar xz
-          cd openssl-3.0.0 && ./config && make -j$(nproc) && sudo make install_sw
+          cd openssl-3.0.0 
+          ./config --prefix=$HOME/.release/openssl
+          make -j$(nproc) && sudo make install_sw
       - name: Build FFmpeg
         run: |
           set -euxo pipefail
@@ -313,7 +497,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
             --enable-libx264 --enable-gpl --enable-libopus
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
@@ -324,26 +509,49 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
 
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   openssl-latest:
@@ -356,7 +564,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-3.5.0.tar.gz | tar xz
-          cd openssl-3.5.0 && ./config && make -j$(nproc) && sudo make install_sw
+          cd openssl-3.5.0 
+          ./config --prefix=$HOME/.release/openssl
+          make -j$(nproc) && sudo make install_sw
       - name: Build FFmpeg
         run: |
           set -euxo pipefail
@@ -366,7 +576,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
             --enable-libx264 --enable-gpl --enable-libopus
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
@@ -377,32 +588,56 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then echo 'Test OK'; break; fi
+            if [[ "$STREAM" == "livestream" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
-            exit 1
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   test-done:
     needs:
       - fate
       - srs
+      - asan
       - openssl-1-0-1k
       - openssl-1-0-2
       - openssl-1-1-0h
