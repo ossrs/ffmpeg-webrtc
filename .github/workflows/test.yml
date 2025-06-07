@@ -181,7 +181,9 @@ jobs:
           cat /proc/sys/kernel/core_pattern
 
           # Publish a test stream to SRS using the whip muxer
-          nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+          # Execute you program with 'sudo'. Core dumps will not be written without elevated 
+          # permissions. See https://gist.github.com/kudaba/53f68340bd28cd1e8824ac1e6ba8cf88
+          nohup sudo ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
@@ -204,20 +206,31 @@ jobs:
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
         run: cat ffstderr.log
-      - name: Find core dumps
+      - name: Upload Coredump Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-dumps
+          retention-days: 7
+          path: /tmp/core.*
+      - name: Show Coredump Files
         run: |
           set -euxo pipefail
+
           shopt -s nullglob
           files=(/tmp/core.*)
+
           if [[ ${#files[@]} -eq 0 ]]; then
             echo "No core dumps found."
             exit 0
           fi
-          for core in /tmp/core.*; do
+            
+          ret=0
+          for core in "${files[@]}"; do
             echo "Core dump found: $core"
             gdb -q -c "$core" -ex "bt" -ex "quit"
-            exit 1
+            ret=1
           done
+          exit $ret
       - name: Check Asan Log
         run: |
           set -euxo pipefail
