@@ -150,10 +150,13 @@ jobs:
       - name: Setup Coredump
         run: |
           set -euxo pipefail
+
           sudo apt-get update
           sudo apt-get install -y gdb
-          echo '/tmp/core.%e.%p' | sudo tee /proc/sys/kernel/core_pattern &&
-            cat /proc/sys/kernel/core_pattern
+
+          sudo mkdir /cores
+          sudo chmod 777 /cores
+          sudo bash -c 'echo "/cores/core.%e.%p.%t" > /proc/sys/kernel/core_pattern'
       - name: Build FFmpeg
         run: |
           set -euxo pipefail
@@ -184,13 +187,10 @@ jobs:
           cat /proc/sys/kernel/core_pattern
 
           # Publish a test stream to SRS using the whip muxer
-          # Execute you program with 'sudo'. Core dumps will not be written without elevated 
-          # permissions. See https://gist.github.com/kudaba/53f68340bd28cd1e8824ac1e6ba8cf88
-          nohup sudo ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+          nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
-          sudo chmod +x ffstdout.log ffstderr.log
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -204,12 +204,12 @@ jobs:
           fi
 
           # TEST: Generate a coredump.
-          sudo pkill -SIGSEGV ffmpeg
+          pkill -SIGSEGV ffmpeg
           sleep 3
           exit 0
 
           # Stop FFmpeg normally.
-          sudo pkill ffmpeg
+          pkill ffmpeg
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
