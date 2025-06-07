@@ -83,7 +83,7 @@ jobs:
 
   srs:
     name: "FFmpeg with SRS"
-    needs: build
+    #needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
