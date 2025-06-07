@@ -7,6 +7,7 @@ on:
 permissions: read-all
 
 # Results for commonly used commands:
+#     $HOME is /home/runner
 #     $(pwd) is /home/runner/work/ffmpeg-webrtc/ffmpeg-webrtc
 #     $(nproc) is 4
 #     $(whoami) is runner
@@ -270,7 +271,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -323,7 +325,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
             --enable-libx264 --enable-gpl --enable-libopus
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
@@ -378,7 +381,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
             --enable-libx264 --enable-gpl --enable-libopus
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
