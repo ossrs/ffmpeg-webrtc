@@ -107,16 +107,17 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
-        id: streaming
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -128,12 +129,14 @@ jobs:
             fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
-
-          # Stop FFmpeg normally.
+      - name: Stop FFmpeg normally
+        run: |
+          set -euxo pipefail
           pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -176,16 +179,17 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
-        id: streaming
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -197,17 +201,20 @@ jobs:
             fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
+      - name: Stop FFmpeg normally
+        run: |
+          set -euxo pipefail
 
           # TEST: Generate a coredump.
           #pkill -SIGSEGV ffmpeg
           #sleep 3
           #exit 0
 
-          # Stop FFmpeg normally.
           pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -269,8 +276,7 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
-        id: streaming
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
 
@@ -283,6 +289,10 @@ jobs:
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -294,17 +304,20 @@ jobs:
             fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
+      - name: Stop FFmpeg normally
+        run: |
+          set -euxo pipefail
 
           # TEST: Generate a coredump.
           #pkill -SIGSEGV ffmpeg
           #sleep 3
           #exit 0
 
-          # Stop FFmpeg normally.
           pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -395,15 +408,16 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
-        id: streaming
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
 
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -415,12 +429,14 @@ jobs:
             fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
-
-          # Stop FFmpeg normally.
+      - name: Stop FFmpeg normally
+        run: |
+          set -euxo pipefail
           pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -473,15 +489,16 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
-        id: streaming
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -493,12 +510,14 @@ jobs:
             fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
-
-          # Stop FFmpeg normally.
+      - name: Stop FFmpeg normally
+        run: |
+          set -euxo pipefail
           pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -551,15 +570,16 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
-        id: streaming
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -571,12 +591,14 @@ jobs:
             fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
-
-          # Stop FFmpeg normally.
+      - name: Stop FFmpeg normally
+        run: |
+          set -euxo pipefail
           pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -626,16 +648,17 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
-        id: streaming
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
 
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -647,12 +670,14 @@ jobs:
             fi
             sleep 3
           done
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
-
-          # Stop FFmpeg normally.
+      - name: Stop FFmpeg normally
+        run: |
+          set -euxo pipefail
           pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -702,16 +727,17 @@ jobs:
           docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
               --env CANDIDATE=$ip -p 8000:8000/udp \
               ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Test FFmpeg with SRS
-        id: streaming
+      - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
-
-          # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -723,12 +749,14 @@ jobs:
             fi
             sleep 3
           done
+          
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
-
-          # Stop FFmpeg normally.
+      - name: Stop FFmpeg normally
+        run: |
+          set -euxo pipefail
           pkill -SIGINT ffmpeg && sleep 3
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
