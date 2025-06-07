@@ -215,23 +215,25 @@ jobs:
       - name: Show FFmpeg Stderr Log
         run: cat ffstderr.log
       - name: Check for core dumps
+        id: check_coredumps
         run: |
+          set -euxo pipefail
           shopt -s nullglob
           files=(/tmp/core.*)
           if [[ ${#files[@]} -gt 0 ]]; then
-            echo "HAS_COREDUMP=true" >> "$GITHUB_ENV"
+            echo "has_coredump=true" >> $GITHUB_OUTPUT
           else
-            echo "HAS_COREDUMP=false" >> "$GITHUB_ENV"
+            echo "has_coredump=false" >> $GITHUB_OUTPUT
           fi
       - name: Upload Coredump Files
-        if: env.HAS_COREDUMP == 'true'
+        if: ${{ steps.check_coredumps.outputs.has_coredump == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: core-dumps
           retention-days: 7
           path: /tmp/core.*
       - name: Upload FFmpeg Binary
-        if: env.HAS_COREDUMP == 'true'
+        if: ${{ steps.check_coredumps.outputs.has_coredump == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: core-dumps
@@ -240,19 +242,11 @@ jobs:
             ffmpeg
             ffmpeg_g
       - name: Show Coredump Files
+        if: ${{ steps.check_coredumps.outputs.has_coredump == 'true' }}
         run: |
           set -euxo pipefail
-
-          shopt -s nullglob
-          files=(/tmp/core.*)
-
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "No core dumps found."
-            exit 0
-          fi
-            
           ret=0
-          for core in "${files[@]}"; do
+          for core in /tmp/core.*; do
             echo "Core dump found: $core"
             gdb -q -c "$core" -ex "bt" -ex "quit"
             ret=1
