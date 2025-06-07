@@ -138,7 +138,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-1.0.1k.tar.gz | tar xz
-          cd openssl-1.0.1k && ./config && make -j1 && sudo make install_sw
+          cd openssl-1.0.1k
+          ./config --prefix=$HOME/.release/openssl && make -j1
+          sudo make install_sw
       - name: Download Test File
         run: |
           set -euxo pipefail
@@ -152,7 +154,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -193,7 +196,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-1.0.2.tar.gz | tar xz
-          cd openssl-1.0.2 && ./config && make -j1 && sudo make install_sw
+          cd openssl-1.0.2 
+          ./config --prefix=$HOME/.release/openssl
+          make -j1 && sudo make install_sw
       - name: Download Test File
         run: |
           set -euxo pipefail
@@ -207,7 +212,8 @@ jobs:
           sudo apt-get install -y nasm pkg-config jq libopus-dev libx264-dev
 
           # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -248,7 +254,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-1.1.0h.tar.gz | tar xz
-          cd openssl-1.1.0h && ./config && make -j$(nproc) && sudo make install_sw
+          cd openssl-1.1.0h 
+          ./config --prefix=$HOME/.release/openssl
+          make -j$(nproc) && sudo make install_sw
       - name: Download Test File
         run: |
           set -euxo pipefail
@@ -303,7 +311,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-3.0.0.tar.gz | tar xz
-          cd openssl-3.0.0 && ./config && make -j$(nproc) && sudo make install_sw
+          cd openssl-3.0.0 
+          ./config --prefix=$HOME/.release/openssl
+          make -j$(nproc) && sudo make install_sw
       - name: Build FFmpeg
         run: |
           set -euxo pipefail
@@ -356,7 +366,9 @@ jobs:
         run: |
           set -euxo pipefail
           curl -s -L https://www.openssl.org/source/openssl-3.5.0.tar.gz | tar xz
-          cd openssl-3.5.0 && ./config && make -j$(nproc) && sudo make install_sw
+          cd openssl-3.5.0 
+          ./config --prefix=$HOME/.release/openssl
+          make -j$(nproc) && sudo make install_sw
       - name: Build FFmpeg
         run: |
           set -euxo pipefail
