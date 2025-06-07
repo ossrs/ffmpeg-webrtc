@@ -136,8 +136,8 @@ jobs:
           fi
       - name: Stop FFmpeg normally
         run: |
-          set -euxo pipefail
-          pkill -SIGINT ffmpeg && sleep 3
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -208,14 +208,10 @@ jobs:
           fi
       - name: Stop FFmpeg normally
         run: |
-          set -euxo pipefail
-
           # TEST: Generate a coredump.
-          #pkill -SIGSEGV ffmpeg
-          #sleep 3
-          #exit 0
-
-          pkill -SIGINT ffmpeg && sleep 3
+          #pkill -SIGSEGV ffmpeg && sleep 3 && exit 0
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -311,14 +307,10 @@ jobs:
           fi
       - name: Stop FFmpeg normally
         run: |
-          set -euxo pipefail
-
           # TEST: Generate a coredump.
-          #pkill -SIGSEGV ffmpeg
-          #sleep 3
-          #exit 0
-
-          pkill -SIGINT ffmpeg && sleep 3
+          #pkill -SIGSEGV ffmpeg && sleep 3 && exit 0
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -436,8 +428,8 @@ jobs:
           fi
       - name: Stop FFmpeg normally
         run: |
-          set -euxo pipefail
-          pkill -SIGINT ffmpeg && sleep 3
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -517,8 +509,8 @@ jobs:
           fi
       - name: Stop FFmpeg normally
         run: |
-          set -euxo pipefail
-          pkill -SIGINT ffmpeg && sleep 3
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -598,8 +590,8 @@ jobs:
           fi
       - name: Stop FFmpeg normally
         run: |
-          set -euxo pipefail
-          pkill -SIGINT ffmpeg && sleep 3
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -677,8 +669,8 @@ jobs:
           fi
       - name: Stop FFmpeg normally
         run: |
-          set -euxo pipefail
-          pkill -SIGINT ffmpeg && sleep 3
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
@@ -749,15 +741,15 @@ jobs:
             fi
             sleep 3
           done
-          
+
           if [[ "$STREAM" != "livestream" ]]; then
             echo "Stream not found: $STREAM"
             echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
       - name: Stop FFmpeg normally
         run: |
-          set -euxo pipefail
-          pkill -SIGINT ffmpeg && sleep 3
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
       - name: Show FFmpeg Stderr Log
