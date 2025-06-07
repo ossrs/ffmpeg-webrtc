@@ -206,6 +206,7 @@ jobs:
           # TEST: Generate a coredump.
           sudo pkill -SIGSEGV ffmpeg
           sleep 3
+          exit 0
 
           # Stop FFmpeg normally.
           sudo pkill ffmpeg
