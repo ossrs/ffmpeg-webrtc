@@ -274,9 +274,9 @@ jobs:
           fi
 
           # TEST: Generate a coredump.
-          #pkill -SIGSEGV ffmpeg
-          #sleep 3
-          #exit 0
+          pkill -SIGSEGV ffmpeg
+          sleep 3
+          exit 0
 
           # Stop FFmpeg normally.
           pkill -SIGINT ffmpeg
