@@ -2606,7 +2606,6 @@ CONFIG_EXTRA="
     iamfdec
     iamfenc
     idctdsp
-    iirfilter
     inflate_wrapper
     intrax8
     iso_media
@@ -2917,7 +2916,7 @@ wmv2dsp_select="qpeldsp"
 # decoders / encoders
 aac_decoder_select="adts_header mpeg4audio sinewin"
 aac_fixed_decoder_select="adts_header mpeg4audio"
-aac_encoder_select="audio_frame_queue iirfilter lpc sinewin"
+aac_encoder_select="audio_frame_queue lpc sinewin"
 aac_latm_decoder_select="aac_decoder aac_latm_parser"
 ac3_decoder_select="ac3_parser ac3dsp bswapdsp fmtconvert"
 ac3_fixed_decoder_select="ac3_parser ac3dsp bswapdsp"
@@ -7490,7 +7489,7 @@ fi
 
 enabled amf &&
     check_cpp_condition amf "AMF/core/Version.h" \
-        "(AMF_VERSION_MAJOR << 48 | AMF_VERSION_MINOR << 32 | AMF_VERSION_RELEASE << 16 | AMF_VERSION_BUILD_NUM) >= 0x0001000400230000"
+        "(AMF_VERSION_MAJOR << 48 | AMF_VERSION_MINOR << 32 | AMF_VERSION_RELEASE << 16 | AMF_VERSION_BUILD_NUM) >= 0x0001000400240000"
 
 # Funny iconv installations are not unusual, so check it after all flags have been set
 if enabled libc_iconv; then
