@@ -115,7 +115,7 @@ jobs:
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -127,6 +127,15 @@ jobs:
             echo "Stream not found: $STREAM"
             exit 1
           fi
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
     runs-on: ubuntu-22.04
 
   asan:
@@ -140,8 +149,8 @@ jobs:
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y gdb
-          ulimit -c unlimited
-          echo '/tmp/core.%e.%p' | sudo tee /proc/sys/kernel/core_pattern
+          echo '/tmp/core.%e.%p' | sudo tee /proc/sys/kernel/core_pattern &&
+            cat /proc/sys/kernel/core_pattern
       - name: Build FFmpeg
         run: |
           set -euxo pipefail
@@ -166,6 +175,10 @@ jobs:
       - name: Test FFmpeg with SRS
         run: |
           set -euxo pipefail
+
+          # Enable coredumps
+          ulimit -c unlimited && ulimit -c
+          cat /proc/sys/kernel/core_pattern
 
           # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
@@ -208,10 +221,8 @@ jobs:
       - name: Check Asan Log
         run: |
           set -euxo pipefail
-
           cat ffstderr.log |grep 'ERROR: AddressSanitizer' && 
-          echo "AddressSanitizer error found in ffstderr.log" && exit 1
-
+            echo "AddressSanitizer error found in ffstderr.log" && exit 1
           echo "AddressSanitizer is ok"
     runs-on: ubuntu-22.04
 
@@ -259,7 +270,7 @@ jobs:
           # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
 
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -271,6 +282,15 @@ jobs:
             echo "Stream not found: $STREAM"
             exit 1
           fi
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-0-2:
@@ -317,7 +337,7 @@ jobs:
           # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -329,6 +349,15 @@ jobs:
             echo "Stream not found: $STREAM"
             exit 1
           fi
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
     runs-on: ubuntu-22.04
 
   openssl-1-1-0h:
@@ -375,7 +404,7 @@ jobs:
           # Publish a test stream to SRS using the whip muxer
           nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -387,6 +416,15 @@ jobs:
             echo "Stream not found: $STREAM"
             exit 1
           fi
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
     runs-on: ubuntu-22.04
 
   openssl-3-0:
@@ -431,7 +469,7 @@ jobs:
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
 
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -443,6 +481,15 @@ jobs:
             echo "Stream not found: $STREAM"
             exit 1
           fi
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
     runs-on: ubuntu-22.04
 
   openssl-latest:
@@ -487,7 +534,7 @@ jobs:
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
-            >/dev/null 2>&1 &
+            1>ffstdout.log 2>ffstderr.log &
           
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
@@ -499,6 +546,15 @@ jobs:
             echo "Stream not found: $STREAM"
             exit 1
           fi
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
     runs-on: ubuntu-22.04
 
   test-done:
