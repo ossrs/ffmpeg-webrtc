@@ -633,6 +633,58 @@ jobs:
         run: exit 1
     runs-on: ubuntu-22.04
 
+  generate-patch:
+    name: "Generate Patch"
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      # Checkout to workflows branch, make sure the base branch is available.
+      - name: Checkout repository with workflows branch
+        uses: actions/checkout@v4
+        with:
+          ref: workflows
+          fetch-depth: 0
+      - name: Try to checkout to workflows branch
+        run: |
+          set -euxo pipefail
+          git checkout workflows
+          git branch -vv
+      # Checkout to PR commit, use the lastest script.
+      - name: Checkout repository to PR commit
+        uses: actions/checkout@v4
+      - name: Show Git Info
+        run: |
+          set -euxo pipefail
+          git branch -vv
+          echo "Repository: ${{ github.repository }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Pull Request Number: ${{ github.event.pull_request.number }}"
+      - name: Install Dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+      - name: Run Script
+        id: format_patch
+        run: |
+          set -euxo pipefail
+
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          PATCH_FILENAME="whip-patch-$PR_NUMBER-$(date +%s)"
+          echo "PR ID is ${{ github.event.pull_request.number }}"
+          echo "Patch file is $PATCH_FILENAME.patch"
+
+          bash .github/workflows/format-patch.sh $PR_NUMBER "$PATCH_FILENAME.patch"
+          echo "patch_file=$PATCH_FILENAME" >> $GITHUB_OUTPUT
+      - name: Upload all patch files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.format_patch.outputs.patch_file }}
+          path: |
+            whip-*.patch
+          retention-days: 90
+    runs-on: ubuntu-22.04
+
   test-done:
     needs:
       - fate
@@ -643,6 +695,7 @@ jobs:
       - openssl-1-1-0h
       - openssl-3-0
       - openssl-latest
+      - generate-patch
     steps:
       - run: echo 'All done'
     runs-on: ubuntu-22.04
