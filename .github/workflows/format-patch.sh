@@ -90,7 +90,7 @@ if [[ -z "$FIRST_AUTHOR_NAME" || -z "$FIRST_AUTHOR_EMAIL" ]]; then
     exit 1
 fi
 
-COAUTHORS=$(git log workflows..HEAD --format='Co-authored-by: %an <%ae>' |grep -v "$FIRST_AUTHOR_NAME" | sort -u)
+COAUTHORS=$(git log workflows..HEAD --format='Co-authored-by: %an <%ae>' | sort -u)
 COAUTHOR_COUNT=$(echo "$COAUTHORS" | wc -l)
 if [[ "$COAUTHOR_COUNT" -gt 0 ]]; then
     echo "$COAUTHORS"
