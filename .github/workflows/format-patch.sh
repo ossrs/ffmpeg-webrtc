@@ -11,6 +11,7 @@ fi
 
 PR_NUMBER="$1"
 PATCH_FILE="$2"
+TMP_BRANCH="$3"
 if [ -z "$PR_NUMBER" ]; then
   echo "Please provide a PR link or number. For example: https://github.com/ossrs/ffmpeg-webrtc/pull/20"
   exit 1
@@ -52,7 +53,7 @@ fi
 
 git checkout workflows &&
 echo "Switched to workflows branch." &&
-git pull
+git pull &&
 echo "Pulled latest changes from workflows branch."
 if [[ $? -ne 0 ]]; then
     echo "Failed to switch to workflows branch or pull latest changes."
@@ -71,7 +72,9 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
-TMP_BRANCH=tmp-branch-for-patch-$PR_NUMBER &&
+if [[ -z "$TMP_BRANCH" ]]; then
+    TMP_BRANCH="tmp-branch-for-patch-$PR_NUMBER"
+fi &&
 if git branch --list "$TMP_BRANCH" | grep -q "^..$TMP_BRANCH$"; then
     git branch -D "$TMP_BRANCH"
 fi &&
@@ -90,7 +93,7 @@ if [[ -z "$FIRST_AUTHOR_NAME" || -z "$FIRST_AUTHOR_EMAIL" ]]; then
     exit 1
 fi
 
-COAUTHORS=$(git log workflows..HEAD --format='Co-authored-by: %an <%ae>' |grep -v "$FIRST_AUTHOR_NAME" | sort -u)
+COAUTHORS=$(git log workflows..HEAD --format='Co-authored-by: %an <%ae>' | sort -u)
 COAUTHOR_COUNT=$(echo "$COAUTHORS" | wc -l)
 if [[ "$COAUTHOR_COUNT" -gt 0 ]]; then
     echo "$COAUTHORS"
@@ -109,14 +112,27 @@ fi
 echo "Commit information:"
 echo "Author: $FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>"
 echo "==================================================================="
-echo -n -e "$COMMIT_MSG"
+echo -e "$COMMIT_MSG"
 echo "==================================================================="
 echo ""
 
+if [[ $(git config --list  --local |grep 'user.name' >/dev/null 2>&1 && echo yes) != "yes" ]]; then
+    git config --local user.name "$FIRST_AUTHOR_NAME"
+fi &&
+if [[ $(git config --list  --local |grep 'user.email' >/dev/null 2>&1 && echo yes) != "yes" ]]; then
+    git config --local user.email "$FIRST_AUTHOR_EMAIL"
+fi &&
+git config --list &&
+echo "Set local git user configuration to: $FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to set local git user configuration."
+    exit 1
+fi
+
 git rebase workflows &&
 git reset --soft workflows &&
-git commit --author "$FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>" -m "$(echo -n -e "$COMMIT_MSG")" &&
-echo "Squashed commits into a single commit." &&
+git commit --author "$FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>" -m "$(echo -e "$COMMIT_MSG")" &&
+echo "Squashed commits into a single commit."
 if [[ $? -ne 0 ]]; then
     echo "Failed to rebase or commit changes."
     exit 1
