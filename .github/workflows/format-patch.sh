@@ -109,14 +109,14 @@ fi
 echo "Commit information:"
 echo "Author: $FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>"
 echo "==================================================================="
-echo -n -e "$COMMIT_MSG"
+echo -e "$COMMIT_MSG"
 echo "==================================================================="
 echo ""
 
-if [[ $(git config --list  --local |grep user.name >/dev/null 2>&1 && echo yes) != "yes"]]; then
+if [[ $(git config --list  --local |grep 'user.name' >/dev/null 2>&1 && echo yes) != "yes" ]]; then
     git config --local user.name "$FIRST_AUTHOR_NAME"
 fi &&
-if [[ $(git config --list  --local |grep user.email >/dev/null 2>&1 && echo yes) != "yes"]]; then
+if [[ $(git config --list  --local |grep 'user.email' >/dev/null 2>&1 && echo yes) != "yes" ]]; then
     git config --local user.email "$FIRST_AUTHOR_EMAIL"
 fi &&
 git config --list &&
@@ -128,7 +128,7 @@ fi
 
 git rebase workflows &&
 git reset --soft workflows &&
-git commit --author "$FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>" -m "$(echo -n -e "$COMMIT_MSG")" &&
+git commit --author "$FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>" -m "$(echo -e "$COMMIT_MSG")" &&
 echo "Squashed commits into a single commit."
 if [[ $? -ne 0 ]]; then
     echo "Failed to rebase or commit changes."
