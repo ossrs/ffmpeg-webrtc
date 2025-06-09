@@ -1903,8 +1903,8 @@ static const AVOption options[] = {
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },                        0,        0, ENC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },                        0,        0, ENC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),           AV_OPT_TYPE_STRING, { .str = NULL },                        0,        0, ENC },
-    { "whip_flags",         "set flags affecting WHIP connection behavior",             OFFSET(flags),              AV_OPT_TYPE_FLAGS,  { .i64 = 0 },                           0, UINT_MAX, ENC, .unit = "flags" },
-    { "ignore_ipv6",        "ignore any IPv6 ICE candidate",                            0,                          AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 },       0, UINT_MAX, ENC, .unit = "flags" },
+    { "whip_flags",         "Set flags affecting WHIP connection behavior",             OFFSET(flags),              AV_OPT_TYPE_FLAGS,  { .i64 = 0 },                           0, UINT_MAX, ENC, .unit = "flags" },
+    { "ignore_ipv6",        "The optional Ignore any IPv6 ICE candidate",               0,                          AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 },       0, UINT_MAX, ENC, .unit = "flags" },
     { NULL },
 };
 
