@@ -671,11 +671,18 @@ jobs:
 
           PR_NUMBER=${{ github.event.pull_request.number }}
           PATCH_FILENAME="whip-patch-$PR_NUMBER-$(date +%s)"
+          TMP_BRANCH="tmp-branch-for-patch-$PR_NUMBER"
           echo "PR ID is ${{ github.event.pull_request.number }}"
           echo "Patch file is $PATCH_FILENAME.patch"
+          echo "Temporary branch is $TMP_BRANCH"
 
           bash .github/workflows/format-patch.sh $PR_NUMBER "$PATCH_FILENAME.patch"
           echo "patch_file=$PATCH_FILENAME" >> $GITHUB_OUTPUT
+          echo "temporary_branch=$TMP_BRANCH" >> $GITHUB_OUTPUT
+      - name: Show Branch Info
+        run: git show ${{ steps.format_patch.outputs.temporary_branch }}
+      - name: Show Patch File
+        run: cat ${{ steps.format_patch.outputs.patch_file }}.patch
       - name: Upload all patch files
         uses: actions/upload-artifact@v4
         with:
