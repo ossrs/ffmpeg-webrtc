@@ -11,6 +11,7 @@ fi
 
 PR_NUMBER="$1"
 PATCH_FILE="$2"
+TMP_BRANCH="$3"
 if [ -z "$PR_NUMBER" ]; then
   echo "Please provide a PR link or number. For example: https://github.com/ossrs/ffmpeg-webrtc/pull/20"
   exit 1
@@ -71,7 +72,9 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
-TMP_BRANCH=tmp-branch-for-patch-$PR_NUMBER &&
+if [[ -z "$TMP_BRANCH" ]]; then
+    TMP_BRANCH="tmp-branch-for-patch-$PR_NUMBER"
+fi &&
 if git branch --list "$TMP_BRANCH" | grep -q "^..$TMP_BRANCH$"; then
     git branch -D "$TMP_BRANCH"
 fi &&
