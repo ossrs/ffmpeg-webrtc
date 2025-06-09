@@ -52,7 +52,7 @@ fi
 
 git checkout workflows &&
 echo "Switched to workflows branch." &&
-git pull
+git pull &&
 echo "Pulled latest changes from workflows branch."
 if [[ $? -ne 0 ]]; then
     echo "Failed to switch to workflows branch or pull latest changes."
@@ -113,10 +113,23 @@ echo -n -e "$COMMIT_MSG"
 echo "==================================================================="
 echo ""
 
+if [[ $(git config --list  --local |grep user.name >/dev/null 2>&1 && echo yes) != "yes"]]; then
+    git config --local user.name "$FIRST_AUTHOR_NAME"
+fi &&
+if [[ $(git config --list  --local |grep user.email >/dev/null 2>&1 && echo yes) != "yes"]]; then
+    git config --local user.email "$FIRST_AUTHOR_EMAIL"
+fi &&
+git config --list &&
+echo "Set local git user configuration to: $FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>"
+if [[ $? -ne 0 ]]; then
+    echo "Failed to set local git user configuration."
+    exit 1
+fi
+
 git rebase workflows &&
 git reset --soft workflows &&
 git commit --author "$FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>" -m "$(echo -n -e "$COMMIT_MSG")" &&
-echo "Squashed commits into a single commit." &&
+echo "Squashed commits into a single commit."
 if [[ $? -ne 0 ]]; then
     echo "Failed to rebase or commit changes."
     exit 1
