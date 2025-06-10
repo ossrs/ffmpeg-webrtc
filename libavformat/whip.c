@@ -143,9 +143,9 @@
 #define WHIP_RTCP_PT_END   223
 
 /**
- * Consent-freshness constants ญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญญ
+ * Consent-freshness constants
  */ 
-#define WHIP_CONSENT_DEF_INTERVAL   15000   /* ms – RFC 7675 default */
+#define WHIP_CONSENT_DEF_INTERVAL   15000   /* ms โ€“ RFC 7675 default */
 #define WHIP_CONSENT_MAX_FAILURES   3
 
 /**
