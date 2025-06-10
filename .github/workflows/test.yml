@@ -676,14 +676,23 @@ jobs:
           echo "Patch file is $PATCH_FILENAME.patch"
           echo "Temporary branch is $TMP_BRANCH"
 
-          bash .github/workflows/format-patch.sh $PR_NUMBER "$PATCH_FILENAME.patch"
+          bash .github/scripts/format-patch.sh $PR_NUMBER "$PATCH_FILENAME.patch"
           echo "patch_file=$PATCH_FILENAME" >> $GITHUB_OUTPUT
           echo "temporary_branch=$TMP_BRANCH" >> $GITHUB_OUTPUT
+
+          if [[ -f "$PATCH_FILENAME.patch" ]]; then
+            echo "has_patch=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_patch=false" >> $GITHUB_OUTPUT
+          fi
       - name: Show Branch Info
+        if: ${{ steps.format_patch.outputs.has_patch == 'true' }}
         run: git show ${{ steps.format_patch.outputs.temporary_branch }}
       - name: Show Patch File
+        if: ${{ steps.format_patch.outputs.has_patch == 'true' }}
         run: cat ${{ steps.format_patch.outputs.patch_file }}.patch
       - name: Upload all patch files
+        if: ${{ steps.format_patch.outputs.has_patch == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.format_patch.outputs.patch_file }}
