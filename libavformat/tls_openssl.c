@@ -329,7 +329,8 @@ static int openssl_gen_certificate(EVP_PKEY *pkey, X509 **cert, char **fingerpri
         goto enomem_end;
     }
 
-    serial = (int)av_get_random_seed();
+    // According to RFC5280 4.1.2.2, The serial number MUST be a positive integer
+    serial = (int)(av_get_random_seed() & 0x7FFFFFFF);
     if (ASN1_INTEGER_set(X509_get_serialNumber(*cert), serial) != 1) {
         av_log(NULL, AV_LOG_ERROR, "TLS: Failed to set serial, %s\n", ERR_error_string(ERR_get_error(), NULL));
         goto einval_end;
