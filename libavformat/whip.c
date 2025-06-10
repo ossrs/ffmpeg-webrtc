@@ -1942,10 +1942,8 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                         const RtpHistoryItem * it = rtp_history_find(whip, seq);
                         if (it)
                             send_rtx_packet(s, it->pkt, it->size);
-
                         }
                     }
-
                 }
                 ptr += len;
             }
