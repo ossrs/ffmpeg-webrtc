@@ -19,7 +19,7 @@ jobs:
       - name: Build FFmpeg Fate Cache
         run:  |
           set -euxo pipefail
-          docker build -t ossrs/srs:ffmpeg-fate -f .github/workflows/Dockerfile .
+          docker build -t ossrs/srs:ffmpeg-fate -f .github/docker/Dockerfile .
       - name: Push FFmpeg Fate Cache
         run:  |
           set -euxo pipefail
