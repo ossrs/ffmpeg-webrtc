@@ -1902,7 +1902,6 @@ static const AVClass whip_muxer_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-// TODO: FIXME: For test.
 const FFOutputFormat ff_whip_muxer = {
     .p.name             = "whip",
     .p.long_name        = NULL_IF_CONFIG_SMALL("WHIP(WebRTC-HTTP ingestion protocol) muxer"),
