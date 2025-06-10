@@ -676,7 +676,7 @@ jobs:
           echo "Patch file is $PATCH_FILENAME.patch"
           echo "Temporary branch is $TMP_BRANCH"
 
-          bash .github/workflows/format-patch.sh $PR_NUMBER "$PATCH_FILENAME.patch"
+          bash .github/scripts/format-patch.sh $PR_NUMBER "$PATCH_FILENAME.patch"
           echo "patch_file=$PATCH_FILENAME" >> $GITHUB_OUTPUT
           echo "temporary_branch=$TMP_BRANCH" >> $GITHUB_OUTPUT
       - name: Show Branch Info
