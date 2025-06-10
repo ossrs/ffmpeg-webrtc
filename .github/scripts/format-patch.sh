@@ -149,6 +149,12 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
+if [[ $(git status | grep 'nothing to commit, working tree clean' >/dev/null 2>&1 && echo yes) == "yes" ]]; then
+    echo "${LOGPREFIX} No changes to commit. Exiting."
+    git checkout workflows
+    exit 0
+fi
+
 git commit --author "$FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>" -m "$(echo -e "$COMMIT_MSG")" &&
 echo "${LOGPREFIX} Squashed commits into a single commit."
 if [[ $? -ne 0 ]]; then
