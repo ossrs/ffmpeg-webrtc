@@ -145,7 +145,7 @@
 /**
  * Consent-freshness constants
  */ 
-#define WHIP_CONSENT_DEF_INTERVAL   15000   /* ms – RFC 7675 default */
+#define WHIP_CONSENT_DEF_INTERVAL   15000   /* ms - RFC 7675 default */
 #define WHIP_CONSENT_MAX_FAILURES   3
 
 /**
