@@ -131,6 +131,22 @@ fi
 
 git rebase workflows &&
 git reset --soft workflows &&
+echo "Rebased onto workflows branch and reset to soft."
+if [[ $? -ne 0 ]]; then
+    echo "Failed to rebase or reset changes."
+    exit 1
+fi
+
+git status &&
+git restore --staged .github &&
+git restore .github &&
+git status &&
+echo "Restored .github directory to the state of workflows branch."
+if [[ $? -ne 0 ]]; then
+    echo "Failed to restore .github directory."
+    exit 1
+fi
+
 git commit --author "$FIRST_AUTHOR_NAME <$FIRST_AUTHOR_EMAIL>" -m "$(echo -e "$COMMIT_MSG")" &&
 echo "Squashed commits into a single commit."
 if [[ $? -ne 0 ]]; then
