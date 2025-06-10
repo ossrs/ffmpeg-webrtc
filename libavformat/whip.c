@@ -42,6 +42,7 @@
 #include "network.h"
 #include "srtp.h"
 #include "tls.h"
+
 /**
  * Maximum size limit of a Session Description Protocol (SDP),
  * be it an offer or answer.
@@ -1000,7 +1001,6 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     /* Write the use-candidate attribute */
     avio_wb16(pb, STUN_ATTR_USE_CANDIDATE); /* attribute type use-candidate */
     avio_wb16(pb, 0); /* size of use-candidate */
-
 
     /* Build and update message integrity */
     avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
