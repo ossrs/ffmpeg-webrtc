@@ -149,7 +149,7 @@ if [[ -z "$PATCH_FILE" ]]; then
   PATCH_FILE="whip-patch-$PR_NUMBER-$(date +%s).patch" 
 fi &&
 rm -f $PATCH_FILE &&
-git format-patch -1 --stdout > $PATCH_FILE &&
+git format-patch --add-header "X-Unsent: 1" --to ffmpeg-devel@ffmpeg.org -1 --stdout > $PATCH_FILE &&
 echo "Created patch file: $PATCH_FILE"
 if [[ $? -ne 0 ]]; then
     echo "Failed to create patch file."
