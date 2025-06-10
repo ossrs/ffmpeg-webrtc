@@ -152,6 +152,109 @@ jobs:
         run: exit 1
     runs-on: ubuntu-22.04
 
+  ivs:
+    name: "FFmpeg with AWS IVS"
+    # The IVS test requires AWS credentials, which is not available for pull requests.
+    if: github.event_name != 'pull_request'
+    #needs: build
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:  ${{ secrets.AWS_IVS_AKID }}
+          aws-secret-access-key: ${{ secrets.AWS_IVS_AKSECRET }}
+          aws-region: us-west-2
+      - name: Check AWS credentials
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Create IVS Participant Token
+        id: create-token
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+          # Set duration in minutes, default is 720 (12 hours).
+          echo "::add-mask::${{ secrets.AWS_IVS_STAGE }}"
+          TOKEN=$(aws ivs-realtime create-participant-token\
+            --region us-west-2 \
+            --user-id publisher-user --capabilities PUBLISH \
+            --stage-arn "${{ secrets.AWS_IVS_STAGE }}" \
+            --duration 10 |jq -r '.participantToken.token')
+
+          echo "::add-mask::$TOKEN"
+          echo "token=${TOKEN}" >> $GITHUB_OUTPUT
+      - name: Build FFmpeg
+        run: |
+          set -euo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config libssl-dev libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --enable-libx264 --enable-gpl --enable-libopus
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Streaming with FFmpeg
+        run: |
+          set -euo pipefail
+          TOKEN="${{ steps.create-token.outputs.token }}"
+          nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
+            -f whip -authorization "$TOKEN" "https://global.whip.live-video.net" \
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check IVS Streaming
+        id: streaming
+        run: |
+          set -euo pipefail
+
+          # Check streams in IVS.
+          for ((i=0; i<10; i++)); do
+            SESSION=$(aws ivs-realtime list-stage-sessions \
+              --region us-west-2 --stage-arn "${{ secrets.AWS_IVS_STAGE }}" \
+              --query 'stageSessions[?endTime==`null`]' |jq -r '.[0]?.sessionId')
+
+            if [[ "$SESSION" != "" && "$SESSION" != "null" ]]; then
+              STREAM=$(aws ivs-realtime list-participants \
+                --region us-west-2 --stage-arn "${{ secrets.AWS_IVS_STAGE }}" \
+                --session-id "${SESSION}" --filter-by-published |jq -r '.participants[0].participantId')
+            fi
+
+            if [[ "$STREAM" != "" ]]; then 
+              echo 'Test OK'; 
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break; 
+            fi
+            sleep 3
+          done
+
+          if [[ "$STREAM" == "" ]]; then
+            echo "Stream not found: $STREAM"
+            echo "has_stream=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
+    runs-on: ubuntu-22.04
+
   asan:
     name: "FFmpeg with Asan"
     needs: build
@@ -705,6 +808,7 @@ jobs:
     needs:
       - fate
       - srs
+      - ivs
       - asan
       - openssl-1-0-1k
       - openssl-1-0-2
