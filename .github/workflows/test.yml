@@ -682,8 +682,9 @@ jobs:
 
           if [[ -f "$PATCH_FILENAME.patch" ]]; then
             echo "has_patch=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_patch=false" >> $GITHUB_OUTPUT
           fi
-            
       - name: Show Branch Info
         if: ${{ steps.format_patch.outputs.has_patch == 'true' }}
         run: git show ${{ steps.format_patch.outputs.temporary_branch }}
