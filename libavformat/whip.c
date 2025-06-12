@@ -154,7 +154,7 @@
 /** 
  * Retransmission / NACK support
 */
-#define HISTORY_SIZE_DEFAULT 512
+#define HISTORY_SIZE_DEFAULT 1024
 
 /* Calculate the elapsed time from starttime to endtime in milliseconds. */
 #define ELAPSED(starttime, endtime) ((int)(endtime - starttime) / 1000)
@@ -1919,19 +1919,40 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                 goto end;
             }
         }
-        /* Handle RTCP NACK ( RTPFB / FMT=1 ) */
+        /**
+         * Handle RTCP NACK 
+         * Refer to RFC 4585, Section 6.2.1 
+         * The Generic NACK message is identified by PT=RTPFB and FMT=1. 
+         */
         if (media_is_rtcp(whip->buf, ret)) {
             int ptr = 0;
             while (ptr + 4 <= ret) {
                 uint8_t pt = whip->buf[ptr + 1];
+                /**
+                 * Refer to RFC 3550, Section 6.4.1.
+                 * The length of this RTCP packet in 32-bit words minus one,
+                 * including the header and any padding.
+                 */
                 int len = (AV_RB16(&whip->buf[ptr + 2]) + 1) * 4;
                 if (ptr + len > ret) break;
 
-                if (pt == 205) { /* RTPFB */
+                if (pt == 205) { /* PT=RTPFB */
                     uint8_t fmt = (whip->buf[ptr] & 0x1f);
-                    if (fmt == 1 && len >= 12) {
-                        uint16_t pid = AV_RB16(&whip->buf[ptr + 12 - 4]);
-                        uint16_t blp = AV_RB16(&whip->buf[ptr + 14 - 4]);
+                    if (fmt == 1 && len >= 12) { /* FMT=1 */
+                        /* SRTCP index(4 bytes) + HMAC (SRTP_AES128_CM_SHA1_80 10bytes) */
+                        int srtcp_len = len + 4 + 10;
+                        int ret = ff_srtp_decrypt(&whip->srtp_recv, whip->buf, &srtcp_len);
+                        if (ret < 0) {
+                            av_log(whip, AV_LOG_ERROR, "WHIP: SRTCP decrypt failed: %d\n", ret);
+                            // packet is invalid or authentication failed
+                            break;
+                        }
+                        /**
+                         *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1 
+                         *  TODO: Handle multi NACK in boudary packets.
+                         */
+                        uint16_t pid = AV_RB16(&whip->buf[ptr + 12]);
+                        uint16_t blp = AV_RB16(&whip->buf[ptr + 14]);
 
                         /* retransmit pid + any bit set in blp */
                         for (int bit = -1; bit < 16; bit++) {
@@ -1939,9 +1960,12 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                             if (bit >= 0 && !(blp & (1 << bit)))
                                 continue;
 
-                        const RtpHistoryItem * it = rtp_history_find(whip, seq);
-                        if (it)
-                            send_rtx_packet(s, it->pkt, it->size);
+                            const RtpHistoryItem * it = rtp_history_find(whip, seq);
+                            if (it) {
+                                send_rtx_packet(s, it->pkt, it->size);
+                                av_log(whip, AV_LOG_INFO, "WHIP: NACK packet found: size: %d, seq=%d, blp=%d\n", it->size, seq, blp);
+                            } else
+                                av_log(whip, AV_LOG_INFO, "WHIP: NACK packet, seq=%d, blp=%d, not found\n", seq, blp);
                         }
                     }
                 }
