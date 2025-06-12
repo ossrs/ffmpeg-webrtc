@@ -1949,7 +1949,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                         }
                         /**
                          *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1 
-                         *  TODO: Handle multi NACK in boudary packets.
+                         *  TODO: Handle multi NACKs in bundled packet.
                          */
                         uint16_t pid = AV_RB16(&whip->buf[ptr + 12]);
                         uint16_t blp = AV_RB16(&whip->buf[ptr + 14]);
