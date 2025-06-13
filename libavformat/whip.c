@@ -1497,7 +1497,7 @@ end:
     it->size = size;
     it->seq = AV_RB16(pkt + 2);
 
-    whip->hist_head++;
+    whip->hist_head = ++pos;
 }
 
 static const RtpHistoryItem* rtp_history_find(const WHIPContext *whip, uint16_t seq)
@@ -1559,8 +1559,9 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
     return ret;
 }
 /** 
+ * See https://datatracker.ietf.org/doc/html/rfc4588
  * Build and send a single RTX packet
-*/
+ */
 static int send_rtx_packet(AVFormatContext *s, const uint8_t * orig_pkt, int orig_size)
 {
     WHIPContext * whip = s->priv_data;
@@ -1922,7 +1923,8 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
         /**
          * Handle RTCP NACK 
          * Refer to RFC 4585, Section 6.2.1 
-         * The Generic NACK message is identified by PT=RTPFB and FMT=1. 
+         * The Generic NACK message is identified by PT=RTPFB and FMT=1.
+         * TODO: disable retransmisstion when "-tune zerolatency"
          */
         if (media_is_rtcp(whip->buf, ret)) {
             int ptr = 0;
