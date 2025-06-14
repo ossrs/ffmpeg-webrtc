@@ -294,6 +294,7 @@ typedef struct WHIPContext {
     /* The SRTP send context, to encrypt outgoing packets. */
     SRTPContext srtp_audio_send;
     SRTPContext srtp_video_send;
+    SRTPContext srtp_video_rtx_send;
     SRTPContext srtp_rtcp_send;
     /* The SRTP receive context, to decrypt incoming packets. */
     SRTPContext srtp_recv;
@@ -717,11 +718,11 @@ static int generate_sdp_offer(AVFormatContext *s)
             "a=rtcp-fb:%u nack\r\n"
             "a=rtpmap:%u rtx/90000\r\n"
             "a=fmtp:%u apt=%u\r\n"
+            "a=ssrc-group:FID %u %u\r\n"
             "a=ssrc:%u cname:FFmpeg\r\n"
             "a=ssrc:%u msid:FFmpeg video\r\n"
             "a=ssrc:%u cname:FFmpeg\r\n"
-            "a=ssrc:%u msid:FFmpeg video\r\n"
-            "a=ssrc-group:FID %u %u\r\n",
+            "a=ssrc:%u msid:FFmpeg video\r\n",
             whip->video_payload_type,
             whip->rtx_payload_type,
             whip->ice_ufrag_local,
@@ -738,10 +739,10 @@ static int generate_sdp_offer(AVFormatContext *s)
             whip->rtx_payload_type,
             whip->video_payload_type,
             whip->video_ssrc,
-            whip->video_ssrc,
-            whip->video_rtx_ssrc,
             whip->video_rtx_ssrc,
             whip->video_ssrc,
+            whip->video_ssrc,
+            whip->video_rtx_ssrc,
             whip->video_rtx_ssrc);
     }
 
@@ -1450,6 +1451,12 @@ static int setup_srtp(AVFormatContext *s)
         goto end;
     }
 
+    ret = ff_srtp_set_crypto(&whip->srtp_video_rtx_send, suite, buf);
+    if (ret < 0) {
+        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to set crypto for video rtx send\n");
+        goto end;
+    }
+
     ret = ff_srtp_set_crypto(&whip->srtp_rtcp_send, suite, buf);
     if (ret < 0) {
         av_log(whip, AV_LOG_ERROR, "Failed to set crypto for rtcp send\n");
@@ -1591,7 +1598,7 @@ static int send_rtx_packet(AVFormatContext *s, const uint8_t * orig_pkt, int ori
     new_size = orig_size + 2;
 
     /* Encrypt by SRTP and send out. */
-    cipher_size = ff_srtp_encrypt(&whip->srtp_video_send, whip->buf, new_size, whip->buf, sizeof(whip->buf));
+    cipher_size = ff_srtp_encrypt(&whip->srtp_video_rtx_send, whip->buf, new_size, whip->buf, sizeof(whip->buf));
     if (cipher_size <= 0 || cipher_size < new_size) {
         av_log(whip, AV_LOG_WARNING, "WHIP: Failed to encrypt packet=%dB, cipher=%dB\n", new_size, cipher_size);
         return 0;
