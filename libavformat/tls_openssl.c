@@ -415,11 +415,10 @@ error:
  */
 static EVP_PKEY *pkey_from_pem_string(const char *pem_str, int is_priv)
 {
-    BIO *mem = NULL;
 #if OPENSSL_VERSION_NUMBER < 0x10002000L /* OpenSSL 1.0.2 */
-    mem = BIO_new_mem_buf((void *)pem_str, -1);
+    BIO *mem = BIO_new_mem_buf((void *)pem_str, -1);
 #else
-    mem = BIO_new_mem_buf(pem_str, -1);
+    BIO *mem = BIO_new_mem_buf(pem_str, -1);
 #endif
     if (!mem) {
         av_log(NULL, AV_LOG_ERROR, "BIO_new_mem_buf failed\n");
@@ -450,11 +449,10 @@ static EVP_PKEY *pkey_from_pem_string(const char *pem_str, int is_priv)
  */
 static X509 *cert_from_pem_string(const char *pem_str)
 {
-    BIO *mem = NULL;
 #if OPENSSL_VERSION_NUMBER < 0x10002000L /* OpenSSL 1.0.2 */
-    mem = BIO_new_mem_buf((void *)pem_str, -1);
+    BIO *mem = BIO_new_mem_buf((void *)pem_str, -1);
 #else
-    mem = BIO_new_mem_buf(pem_str, -1);
+    BIO *mem = BIO_new_mem_buf(pem_str, -1);
 #endif
     if (!mem) {
         av_log(NULL, AV_LOG_ERROR, "BIO_new_mem_buf failed\n");
