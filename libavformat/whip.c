@@ -1947,16 +1947,16 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                 if (ptr + len > ret) break;
 
                 if (pt == 205 && fmt == 1 && len >= 12) { /* PT=RTPFB, FMT=1 */
-                        int i;
-                        /* SRTCP index(4 bytes) + HMAC (SRTP_AES128_CM_SHA1_80 10bytes) */
-                        int srtcp_len = len + 4 + 10;
-                        int ret = ff_srtp_decrypt(&whip->srtp_recv, whip->buf, &srtcp_len);
-                        if (ret < 0) {
-                            av_log(whip, AV_LOG_ERROR, "WHIP: SRTCP decrypt failed: %d\n", ret);
-                            // packet is invalid or authentication failed
-                            break;
-                        }
-                        for (i = 0 ; 14 + i <= len; i = i + 4) {
+                    int i;
+                    /* SRTCP index(4 bytes) + HMAC (SRTP_AES128_CM_SHA1_80 10bytes) */
+                    int srtcp_len = len + 4 + 10;
+                    int ret = ff_srtp_decrypt(&whip->srtp_recv, whip->buf, &srtcp_len);
+                    if (ret < 0) {
+                        av_log(whip, AV_LOG_ERROR, "WHIP: SRTCP decrypt failed: %d\n", ret);
+                        // packet is invalid or authentication failed
+                        break;
+                    }
+                    for (i = 0 ; 14 + i <= len; i = i + 4) {
                         /**
                          *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1 
                          *  Handle multi NACKs in bundled packet.
@@ -1972,16 +1972,15 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
 
                             const RtpHistoryItem * it = rtp_history_find(whip, seq);
                             if (it) {
-                                send_rtx_packet(s, it->pkt, it->size);
+                                // send_rtx_packet(s, it->pkt, it->size);
                                 av_log(whip, AV_LOG_INFO, "WHIP: NACK packet found: size: %d, seq=%d, blp=%d\n", it->size, seq, blp);
                             } else
                                 av_log(whip, AV_LOG_INFO, "WHIP: NACK packet, seq=%d, blp=%d, not found, the latest packet seq: %d\n", seq, blp, whip->history[whip->hist_head-1].seq);
                         }
-                        }
+                    }
                 }
                 break;
             }
-
         }
     } else if (ret != AVERROR(EAGAIN)) {
         av_log(whip, AV_LOG_ERROR, "WHIP: Failed to read from UDP socket\n");
