@@ -1935,28 +1935,23 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
          */
         if (media_is_rtcp(whip->buf, ret)) {
             int ptr = 0;
-            while (ptr + 4 <= ret) {
-                uint8_t pt = whip->buf[ptr + 1];
-                uint8_t fmt = (whip->buf[ptr] & 0x1f);
+            uint8_t pt = whip->buf[ptr + 1];
+            uint8_t fmt = (whip->buf[ptr] & 0x1f);
+            if (ptr + 4 <= ret && pt == 205 && fmt == 1 ) {
                 /**
                  * Refer to RFC 3550, Section 6.4.1.
                  * The length of this RTCP packet in 32-bit words minus one,
                  * including the header and any padding.
                  */
                 int len = (AV_RB16(&whip->buf[ptr + 2]) + 1) * 4;
-                if (ptr + len > ret) break;
-
-                if (pt == 205 && fmt == 1 && len >= 12) { /* PT=RTPFB, FMT=1 */
-                    int i;
+                if (ptr + len < ret && len >= 12) {
+                    int i = 0;
                     /* SRTCP index(4 bytes) + HMAC (SRTP_AES128_CM_SHA1_80 10bytes) */
                     int srtcp_len = len + 4 + 10;
                     int ret = ff_srtp_decrypt(&whip->srtp_recv, whip->buf, &srtcp_len);
-                    if (ret < 0) {
+                    if (ret < 0)
                         av_log(whip, AV_LOG_ERROR, "WHIP: SRTCP decrypt failed: %d\n", ret);
-                        // packet is invalid or authentication failed
-                        break;
-                    }
-                    for (i = 0 ; 14 + i <= len; i = i + 4) {
+                    while (12 + i < len && ret >= 0) {
                         /**
                          *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1 
                          *  Handle multi NACKs in bundled packet.
@@ -1977,9 +1972,9 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                             } else
                                 av_log(whip, AV_LOG_INFO, "WHIP: NACK packet, seq=%d, blp=%d, not found, the latest packet seq: %d\n", seq, blp, whip->history[whip->hist_head-1].seq);
                         }
+                        i = i + 4;
                     }
                 }
-                break;
             }
         }
     } else if (ret != AVERROR(EAGAIN)) {
