@@ -1948,7 +1948,9 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                     int i = 0;
                     /* SRTCP index(4 bytes) + HMAC (SRTP_AES128_CM_SHA1_80 10bytes) */
                     int srtcp_len = len + 4 + 10;
-                    int ret = ff_srtp_decrypt(&whip->srtp_recv, whip->buf, &srtcp_len);
+                    uint8_t *pkt = av_malloc(srtcp_len);
+                    memcpy(pkt, whip->buf, srtcp_len);
+                    int ret = ff_srtp_decrypt(&whip->srtp_recv, pkt, &srtcp_len);
                     if (ret < 0)
                         av_log(whip, AV_LOG_ERROR, "WHIP: SRTCP decrypt failed: %d\n", ret);
                     while (12 + i < len && ret >= 0) {
@@ -1956,8 +1958,8 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                          *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1 
                          *  Handle multi NACKs in bundled packet.
                          */
-                        uint16_t pid = AV_RB16(&whip->buf[ptr + 12 + i]);
-                        uint16_t blp = AV_RB16(&whip->buf[ptr + 14 + i]);
+                        uint16_t pid = AV_RB16(&pkt[ptr + 12 + i]);
+                        uint16_t blp = AV_RB16(&pkt[ptr + 14 + i]);
 
                         /* retransmit pid + any bit set in blp */
                         for (int bit = -1; bit < 16; bit++) {
@@ -1967,13 +1969,16 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
 
                             const RtpHistoryItem * it = rtp_history_find(whip, seq);
                             if (it) {
-                                // send_rtx_packet(s, it->pkt, it->size);
+                                send_rtx_packet(s, it->pkt, it->size);
                                 av_log(whip, AV_LOG_INFO, "WHIP: NACK packet found: size: %d, seq=%d, blp=%d\n", it->size, seq, blp);
-                            } else
-                                av_log(whip, AV_LOG_INFO, "WHIP: NACK packet, seq=%d, blp=%d, not found, the latest packet seq: %d\n", seq, blp, whip->history[whip->hist_head-1].seq);
+                            } else {
+                                av_log(whip, AV_LOG_INFO, "WHIP: NACK packet, seq=%d, blp=%d, not found, the latest packet seq: %d, rtx seq: %d\n",
+                                    seq, blp, whip->history[whip->hist_head-1].seq, whip->rtx_seq);
+                            }
                         }
                         i = i + 4;
                     }
+                    av_free(pkt);
                 }
             }
         }
