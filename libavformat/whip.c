@@ -205,6 +205,7 @@ typedef struct WHIPContext {
     /* Parameters for the input audio and video codecs. */
     AVCodecParameters *audio_par;
     AVCodecParameters *video_par;
+    uint8_t constraint_set_flags;
 
     /**
      * The h264_mp4toannexb Bitstream Filter (BSF) bypasses the AnnexB packet;
@@ -440,15 +441,10 @@ static av_cold int initialize(AVFormatContext *s)
 static int parse_profile_level(AVFormatContext *s, AVCodecParameters *par)
 {
     int ret = 0;
-    const uint8_t *r = par->extradata, *r1, *end = par->extradata + par->extradata_size;
-    H264SPS seq, *const sps = &seq;
-    uint32_t state;
+    const uint8_t *r = par->extradata;
     WHIPContext *whip = s->priv_data;
 
     if (par->codec_id != AV_CODEC_ID_H264)
-        return ret;
-
-    if (par->profile != AV_PROFILE_UNKNOWN && par->level != AV_LEVEL_UNKNOWN)
         return ret;
 
     if (!par->extradata || par->extradata_size <= 0) {
@@ -457,28 +453,18 @@ static int parse_profile_level(AVFormatContext *s, AVCodecParameters *par)
         return AVERROR(EINVAL);
     }
 
-    while (1) {
-        r = avpriv_find_start_code(r, end, &state);
-        if (r >= end)
-            break;
+    if (AV_RB32(r) == 0x00000001 && (r[4] & 0x1F) == 7)
+        r = &r[5];
+    else if (AV_RB24(r) == 0x000001 && (r[3] & 0x1F) == 7)
+        r = &r[4];
+    else if (r[0] == 0x01)  // avcC
+        r = &r[1];
+    else
+        return AVERROR(EINVAL);
 
-        r1 = ff_nal_find_startcode(r, end);
-        if ((state & 0x1f) == H264_NAL_SPS) {
-            ret = ff_avc_decode_sps(sps, r, r1 - r);
-            if (ret < 0) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Failed to decode SPS, state=%x, size=%d\n",
-                    state, (int)(r1 - r));
-                return ret;
-            }
-
-            av_log(whip, AV_LOG_VERBOSE, "WHIP: Parse profile=%d, level=%d from SPS\n",
-                sps->profile_idc, sps->level_idc);
-            par->profile = sps->profile_idc;
-            par->level = sps->level_idc;
-        }
-
-        r = r1;
-    }
+    if (par->profile == AV_PROFILE_UNKNOWN) par->profile = r[0];
+    whip->constraint_set_flags = r[1];
+    if (par->level == AV_LEVEL_UNKNOWN) par->level = r[2];
 
     return ret;
 }
@@ -589,7 +575,7 @@ static int parse_codec(AVFormatContext *s)
  */
 static int generate_sdp_offer(AVFormatContext *s)
 {
-    int ret = 0, profile, level, profile_iop;
+    int ret = 0, profile, level;
     const char *acodec_name = NULL, *vcodec_name = NULL;
     AVBPrint bp;
     WHIPContext *whip = s->priv_data;
@@ -657,11 +643,10 @@ static int generate_sdp_offer(AVFormatContext *s)
     }
 
     if (whip->video_par) {
-        profile_iop = profile = whip->video_par->profile;
+        profile = whip->video_par->profile;
         level = whip->video_par->level;
         if (whip->video_par->codec_id == AV_CODEC_ID_H264) {
             vcodec_name = "H264";
-            profile_iop &= AV_PROFILE_H264_CONSTRAINED;
             profile &= (~AV_PROFILE_H264_CONSTRAINED);
         }
 
@@ -689,7 +674,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             vcodec_name,
             whip->video_payload_type,
             profile,
-            profile_iop,
+            whip->constraint_set_flags,
             level,
             whip->video_ssrc,
             whip->video_ssrc);
