@@ -1969,10 +1969,13 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
 
                             const RtpHistoryItem * it = rtp_history_find(whip, seq);
                             if (it) {
-                                send_rtx_packet(s, it->pkt, it->size);
-                                av_log(whip, AV_LOG_INFO, "WHIP: NACK packet found: size: %d, seq=%d, blp=%d\n", it->size, seq, blp);
+                                ret = send_rtx_packet(s, it->pkt, it->size);
+                                av_log(whip, AV_LOG_INFO, 
+                                    "WHIP: NACK, packet found: size: %d, seq=%d, rtx size=%d, lateset stored packet seq:%d\n", 
+                                    it->size, seq, ret, whip->history[whip->hist_head-1].seq);
                             } else {
-                                av_log(whip, AV_LOG_INFO, "WHIP: NACK packet, seq=%d, blp=%d, not found, the latest packet seq: %d, rtx seq: %d\n",
+                                av_log(whip, AV_LOG_INFO,
+                                    "WHIP: NACK, packet not found, seq=%d, blp=%d, latest stored packet seq: %d, latest rtx seq: %d\n",
                                     seq, blp, whip->history[whip->hist_head-1].seq, whip->rtx_seq);
                             }
                         }
