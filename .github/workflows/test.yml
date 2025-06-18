@@ -152,6 +152,58 @@ jobs:
         run: exit 1
     runs-on: ubuntu-22.04
 
+  pion:
+    name: "FFmpeg with Pion"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq libssl-dev libopus-dev libx264-dev
+
+          # Build FFmpeg with WebRTC support
+          ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --enable-libx264 --enable-gpl --enable-libopus
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start Pion
+        run: |
+          sudo apt-get install -y golang
+          set -euxo pipefail
+          git clone https://github.com/pion/webrtc.git
+          cd webrtc/examples/whip-whep
+          go run *.go
+      - name: Streaming with FFmpeg
+        run: |
+          set -euxo pipefail
+          nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
+            -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
+            -f whip -authorization "seanTest" "http://localhost:8080/whip" \
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 || 
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
+    runs-on: ubuntu-22.04
+
+
   asan:
     name: "FFmpeg with Asan"
     needs: build
