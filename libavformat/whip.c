@@ -661,7 +661,7 @@ static int generate_sdp_offer(AVFormatContext *s)
         level = whip->video_par->level;
         if (whip->video_par->codec_id == AV_CODEC_ID_H264) {
             vcodec_name = "H264";
-            profile_iop &= AV_PROFILE_H264_CONSTRAINED;
+            profile_iop = (whip->video_par->profile & AV_PROFILE_H264_CONSTRAINED) ? (1<<6) : 0;
             profile &= (~AV_PROFILE_H264_CONSTRAINED);
         }
 
