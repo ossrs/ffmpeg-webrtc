@@ -249,11 +249,11 @@ jobs:
           npm run build
           npm run start &
 
-          curl -H 'Content-Type: application/json' -d '{"id": "abc123", "room": 2345}' \
-          http://localhost:7080/whip/create
       - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
+          curl -H 'Content-Type: application/json' -d '{"id": "abc123", "room": 2345}' \
+          http://localhost:7080/whip/create
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip 'http://localhost:7080/whip/endpoint/abc123' \
