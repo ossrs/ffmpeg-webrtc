@@ -182,7 +182,7 @@ jobs:
           set -euxo pipefail
           git clone https://github.com/pion/webrtc.git
           cd webrtc/examples/whip-whep
-          go run *.go
+          go run *.go &
       - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
@@ -230,8 +230,8 @@ jobs:
       - name: Start Janus
         run: |
           set -euxo pipefail
-          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
-          sed -I "s|^ *nat_1_1_mapping *=.*|nat_1_1_mapping = \"$ip\"|g" janus.jcfg
+          (ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}') &&
+          sed -I "s|^ *nat_1_1_mapping *=.*|nat_1_1_mapping = \"$ip\"|g" janus.jcfg)
 
           docker run --rm -d -p 8081:8080 -p 8188:8188 -p 8443:8443 -p 20000-20010:20000-20010/udp \
           -v $(pwd)/janus.jcfg:/usr/local/etc/janus/janus.jcfg \
@@ -274,7 +274,6 @@ jobs:
         if: ${{ steps.streaming.outputs.has_stream == 'false' }}
         run: exit 1
     runs-on: ubuntu-22.04
-
 
   asan:
     name: "FFmpeg with Asan"
