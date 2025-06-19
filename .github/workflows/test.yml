@@ -274,6 +274,9 @@ jobs:
       - name: Check Stream Existence
         if: ${{ steps.streaming.outputs.has_stream == 'false' }}
         run: exit 1
+      - name: Setup tmate session
+        if: ${{ failure() }}
+        uses: mxschmitt/action-tmate@v3
     runs-on: ubuntu-22.04
 
   asan:
