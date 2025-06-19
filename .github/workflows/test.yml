@@ -230,16 +230,17 @@ jobs:
       - name: Start Janus
         run: |
           set -euxo pipefail
-          (ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}') &&
-          sed -i "s|^ *nat_1_1_mapping *=.*|nat_1_1_mapping = \"$ip\"|g" janus.jcfg)
-
+          git clone https://github.com/winlinvip/janus-docker.git
+          (cd janus-docker &&
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}') &&
+          sed -i "s|^ *nat_1_1_mapping *=.*|nat_1_1_mapping = \"$ip\"|g" janus.jcfg &&
           docker run --rm -d -p 8081:8080 -p 8188:8188 -p 8443:8443 -p 20000-20010:20000-20010/udp \
           -v $(pwd)/janus.jcfg:/usr/local/etc/janus/janus.jcfg \
           -v $(pwd)/janus.plugin.videoroom.jcfg:/usr/local/etc/janus/janus.plugin.videoroom.jcfg \
           -v $(pwd)/janus.transport.http.jcfg:/usr/local/etc/janus/janus.transport.http.jcfg \
           -v $(pwd)/janus.transport.websockets.jcfg:/usr/local/etc/janus/janus.transport.websockets.jcfg \
           -v $(pwd)/videoroomtest.js:/usr/local/share/janus/demos/videoroomtest.js \
-          ossrs/janus:v1.0.12
+          ossrs/janus:v1.0.12)
 
           git clone https://github.com/meetecho/simple-whip-server.git
           cd simple-whip-server
