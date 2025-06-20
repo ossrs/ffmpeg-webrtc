@@ -832,6 +832,8 @@ jobs:
     needs:
       - fate
       - srs
+      - pion
+      - janus
       - asan
       - openssl-1-0-1k
       - openssl-1-0-2
