@@ -233,7 +233,7 @@ jobs:
           git clone https://github.com/winlinvip/janus-docker.git
           (cd janus-docker &&
           ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}') &&
-          sed -i "s|^ *nat_1_1_mapping *=.*|nat_1_1_mapping = \"$ip\"|g" janus.jcfg &&
+          sed -i "s|\(^[[:blank:]]*nat_1_1_mapping *=\).*|\1\"$ip\"|g" janus.jcfg &&
           docker run --rm -d -p 8081:8080 -p 8188:8188 -p 8443:8443 -p 20000-20010:20000-20010/udp \
           -v $(pwd)/janus.jcfg:/usr/local/etc/janus/janus.jcfg \
           -v $(pwd)/janus.plugin.videoroom.jcfg:/usr/local/etc/janus/janus.plugin.videoroom.jcfg \
