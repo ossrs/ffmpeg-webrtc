@@ -154,7 +154,7 @@
 /** 
  * Retransmission / NACK support
 */
-#define HISTORY_SIZE_DEFAULT 4096
+#define HISTORY_SIZE_DEFAULT 512
 
 /* Calculate the elapsed time from starttime to endtime in milliseconds. */
 #define ELAPSED(starttime, endtime) ((int)(endtime - starttime) / 1000)
@@ -2082,7 +2082,7 @@ static const AVOption options[] = {
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),           AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
-    { "rtx_history",        "Packet history size",                                      OFFSET(history_size),       AV_OPT_TYPE_INT,    { .i64 = HISTORY_SIZE_DEFAULT },      64,   INT_MAX,  DEC },
+    { "rtx_history",        "Packet history size",                                      OFFSET(history_size),       AV_OPT_TYPE_INT,    { .i64 = HISTORY_SIZE_DEFAULT },      64,   2048,  DEC },
     { NULL },
 };
 
