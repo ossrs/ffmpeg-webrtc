@@ -327,7 +327,7 @@ typedef struct WHIPContext {
     int  history_size;
     RtpHistoryItem * history;  /* ring buffer  */
     int hist_head;
-    int enable_nack_rtx;
+    int enable_nack_rtx; /* TODO: using whip_flags */
 } WHIPContext;
 
 /**
@@ -1943,17 +1943,17 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                  * The length of this RTCP packet in 32-bit words minus one,
                  * including the header and any padding.
                  */
-                int len = (AV_RB16(&whip->buf[ptr + 2]) + 1) * 4;
-                if (ptr + len < ret && len >= 12) {
+                int rtcp_len = (AV_RB16(&whip->buf[ptr + 2]) + 1) * 4;
+                /* SRTCP index(4 bytes) + HMAC (SRTP_AES128_CM_SHA1_80 10bytes) */
+                int srtcp_len = rtcp_len + 4 + 10;
+                if (srtcp_len == ret && rtcp_len >= 12) {
                     int i = 0;
-                    /* SRTCP index(4 bytes) + HMAC (SRTP_AES128_CM_SHA1_80 10bytes) */
-                    int srtcp_len = len + 4 + 10;
                     uint8_t *pkt = av_malloc(srtcp_len);
                     memcpy(pkt, whip->buf, srtcp_len);
                     int ret = ff_srtp_decrypt(&whip->srtp_recv, pkt, &srtcp_len);
                     if (ret < 0)
                         av_log(whip, AV_LOG_ERROR, "WHIP: SRTCP decrypt failed: %d\n", ret);
-                    while (12 + i < len && ret >= 0) {
+                    while (12 + i < rtcp_len && ret == 0) {
                         /**
                          *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1 
                          *  Handle multi NACKs in bundled packet.
