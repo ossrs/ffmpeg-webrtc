@@ -1970,13 +1970,13 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                             const RtpHistoryItem * it = rtp_history_find(whip, seq);
                             if (it) {
                                 ret = send_rtx_packet(s, it->pkt, it->size);
-                                av_log(whip, AV_LOG_INFO, 
+                                av_log(whip, AV_LOG_VERBOSE, 
                                     "WHIP: NACK, packet found: size: %d, seq=%d, rtx size=%d, lateset stored packet seq:%d\n", 
                                     it->size, seq, ret, whip->history[whip->hist_head-1].seq);
                             } else {
-                                av_log(whip, AV_LOG_INFO,
-                                    "WHIP: NACK, packet not found, seq=%d, blp=%d, latest stored packet seq: %d, latest rtx seq: %d\n",
-                                    seq, blp, whip->history[whip->hist_head-1].seq, whip->rtx_seq);
+                                av_log(whip, AV_LOG_VERBOSE,
+                                    "WHIP: NACK, packet not found, seq=%d, latest stored packet seq: %d, latest rtx seq: %d\n",
+                                    seq, whip->history[whip->hist_head-1].seq, whip->rtx_seq);
                             }
                         }
                         i = i + 4;
