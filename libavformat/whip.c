@@ -154,7 +154,7 @@
 /** 
  * Retransmission / NACK support
 */
-#define HISTORY_SIZE_DEFAULT 4096
+#define HISTORY_SIZE_DEFAULT 512
 
 /* Calculate the elapsed time from starttime to endtime in milliseconds. */
 #define ELAPSED(starttime, endtime) ((int)(endtime - starttime) / 1000)
