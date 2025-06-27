@@ -1,0 +1,62 @@
+# Augment Guidelines for FFmpeg Repository
+
+project:
+  name: "FFmpeg"
+  description: |
+    A complete, cross-platform solution to record, convert and stream audio and video.
+  type: "media"
+
+architecture:
+  overview: |
+    FFmpeg is organized into several core libraries that handle different aspects of 
+    multimedia processing. The codebase follows a modular design where each library 
+    can be used independently or together. FFmpeg also provides command-line tools 
+    built on top of these libraries.
+  
+  key_directories:
+    - path: "libavcodec"
+      description: |
+        Implements encoders and decoders for audio/video codecs and bitstream processing
+    - path: "libavdevice"
+      description: |
+        Provides abstraction for accessing capture and playback devices
+    - path: "libavfilter"
+      description: |
+        Implements media filtering framework for processing audio and video
+    - path: "libavformat"
+      description: |
+        Handles container formats, muxing/demuxing, and I/O protocols
+    - path: "libavutil"
+      description: |
+        Contains utility functions, data structures, and common components shared across 
+        libraries
+    - path: "libswresample"
+      description: |
+        Implements audio mixing and resampling routines
+    - path: "tests"
+      description: |
+        Contains test suites and validation tools for FFmpeg functionality
+
+components:
+  - name: "WHIP"
+    description: |
+      WebRTC-HTTP Ingestion Protocol implementation for low-latency streaming. Handles 
+      SDP exchange, ICE connectivity, DTLS handshake, SRTP encryption, and RTP 
+      packetization for WebRTC streaming.
+    related_files:
+      - path: "libavformat/whip.c"
+        description: |
+          Core implementation of the WHIP protocol, including SDP offer/answer exchange, 
+          ICE connectivity, DTLS handshake setup, and SRTP encryption for RTP packets
+      - path: "libavformat/tls.h"
+        description: |
+          Header defining the DTLS interface used by WHIP for secure communication, 
+          including functions for certificate handling and DTLS state management
+      - path: "libavformat/tls.c"
+        description: |
+          Common DTLS implementation shared across different SSL backends, providing
+          UDP socket setup for DTLS connections
+      - path: "libavformat/tls_openssl.c"
+        description: |
+          OpenSSL-specific implementation of DTLS functionality, including handshake 
+          procedures and SRTP key material export
