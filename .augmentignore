@@ -1,0 +1,25 @@
+
+# Build artifacts
+**/objs/**
+**/build/**
+**/*.o
+**/*.a
+**/*.so
+**/*.dylib
+**/*.d
+
+# IDE files
+**/.idea/**
+**/.vscode/**
+**/.run/**
+
+# Generated files
+**/.tmp/**
+**/fate-suite/**
+**/*.flv
+**/*.mp4
+**/*.ts
+
+# Other files.
+**/tools/**
+**/tests/**
