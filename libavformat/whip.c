@@ -193,9 +193,14 @@ enum WHIPState {
     WHIP_STATE_FAILED,
 };
 
+typedef enum WHIPFlags {
+    WHIP_FLAG_IGNORE_IPV6  = (1 << 0) // Ignore ipv6 candidate
+} WHIPFlags;
+
 typedef struct WHIPContext {
     AVClass *av_class;
 
+    uint32_t flags;        // enum WHIPFlags
     /* The state of the RTC connection. */
     enum WHIPState state;
     /* The callback return value for DTLS. */
@@ -879,12 +884,18 @@ static int parse_answer(AVFormatContext *s)
             if (ptr && av_stristr(ptr, "host")) {
                 char protocol[17], host[129];
                 int priority, port;
+                struct in6_addr addr6;
                 ret = sscanf(ptr, "%16s %d %128s %d typ host", protocol, &priority, host, &port);
                 if (ret != 4) {
                     av_log(whip, AV_LOG_ERROR, "WHIP: Failed %d to parse line %d %s from %s\n",
                         ret, i, line, whip->sdp_answer);
                     ret = AVERROR(EIO);
                     goto end;
+                }
+
+                if (whip->flags & WHIP_FLAG_IGNORE_IPV6 && inet_pton(AF_INET6, host, &addr6) == 1) {
+                    av_log(whip, AV_LOG_DEBUG, "Ignoring IPv6 ICE candidates %s, line %d %s \n", host, i, line);
+                    continue;
                 }
 
                 if (av_strcasecmp(protocol, "udp")) {
@@ -1898,6 +1909,8 @@ static const AVOption options[] = {
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
+    { "whip_flags",         "Set flags affecting WHIP connection behavior",             OFFSET(flags),         AV_OPT_TYPE_FLAGS,  { .i64 = 0 },                           0, UINT_MAX, ENC, .unit = "flags" },
+    { "ignore_ipv6",        "(Optional) Ignore any IPv6 ICE candidate",                 0,                     AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 },       0, UINT_MAX, ENC, .unit = "flags" },
     { NULL },
 };
 
