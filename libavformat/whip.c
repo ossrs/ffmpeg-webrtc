@@ -43,6 +43,8 @@
 #include "srtp.h"
 #include "tls.h"
 
+#define INET_PTON_OK 1
+
 /**
  * Maximum size limit of a Session Description Protocol (SDP),
  * be it an offer or answer.
@@ -193,9 +195,14 @@ enum WHIPState {
     WHIP_STATE_FAILED,
 };
 
+typedef enum WHIPFlags {
+    WHIP_FLAG_IGNORE_IPV6  = (1 << 0) // Ignore ipv6 candidate
+} WHIPFlags;
+
 typedef struct WHIPContext {
     AVClass *av_class;
 
+    uint32_t flags;        // enum WHIPFlags
     /* The state of the RTC connection. */
     enum WHIPState state;
     /* The callback return value for DTLS. */
@@ -884,6 +891,9 @@ static int parse_answer(AVFormatContext *s)
             if (ptr && av_stristr(ptr, "host")) {
                 char protocol[17], host[129];
                 int priority, port;
+#if HAVE_STRUCT_SOCKADDR_IN6
+                struct in6_addr addr6;
+#endif
                 ret = sscanf(ptr, "%16s %d %128s %d typ host", protocol, &priority, host, &port);
                 if (ret != 4) {
                     av_log(whip, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s\n",
@@ -891,7 +901,12 @@ static int parse_answer(AVFormatContext *s)
                     ret = AVERROR(EIO);
                     goto end;
                 }
-
+#if HAVE_STRUCT_SOCKADDR_IN6
+                if (whip->flags & WHIP_FLAG_IGNORE_IPV6 && inet_pton(AF_INET6, host, &addr6) == INET_PTON_OK) {
+                    av_log(whip, AV_LOG_VERBOSE, "Ignoring IPv6 ICE candidates %s, line %d %s \n", host, i, line);
+                    continue;
+                }
+#endif
                 if (av_strcasecmp(protocol, "udp")) {
                     av_log(whip, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp, line %d %s of %s\n",
                         protocol, i, line, whip->sdp_answer);
@@ -1901,6 +1916,8 @@ static const AVOption options[] = {
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
+    { "whip_flags",         "Set flags affecting WHIP connection behavior",             OFFSET(flags),         AV_OPT_TYPE_FLAGS,  { .i64 = 0 },                           0, UINT_MAX, ENC, .unit = "flags" },
+    { "ignore_ipv6",        "Ignore any IPv6 ICE candidate",                 0,                     AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 },       0, UINT_MAX, ENC, .unit = "flags" },
     { NULL },
 };
 
