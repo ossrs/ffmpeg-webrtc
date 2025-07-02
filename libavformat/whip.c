@@ -2081,13 +2081,13 @@ static int whip_check_bitstream(AVFormatContext *s, AVStream *st, const AVPacket
 #define OFFSET(x) offsetof(WHIPContext, x)
 #define ENC AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption options[] = {
-    { "handshake_timeout",  "Timeout in milliseconds for ICE and DTLS handshake.",      OFFSET(handshake_timeout),  AV_OPT_TYPE_INT,    { .i64 = 5000 },    -1, INT_MAX, ENC },
-    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, ENC },
-    { "authorization",      "Optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
-    { "cert_file",          "Optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
-    { "key_file",           "Optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
-    { "whip_flags",         "Set flags affecting WHIP connection behavior",             OFFSET(flags),         AV_OPT_TYPE_FLAGS,  { .i64 = 0 },                           0, UINT_MAX, ENC, .unit = "flags" },
-    { "ignore_ipv6",        "Ignore any IPv6 ICE candidate",                 0,                     AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 },       0, UINT_MAX, ENC, .unit = "flags" },
+    { "handshake_timeout", "Timeout in milliseconds for ICE and DTLS handshake.", OFFSET(handshake_timeout), AV_OPT_TYPE_INT,  { .i64 = 5000 }, -1, INT_MAX, ENC },
+    { "pkt_size", "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size), AV_OPT_TYPE_INT,  { .i64 = 1200 }, -1, INT_MAX, ENC },
+    { "authorization", "Optional Bearer token for WHIP Authorization", OFFSET(authorization), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, ENC },
+    { "cert_file", "Optional certificate file path for DTLS", OFFSET(cert_file), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, ENC },
+    { "key_file", "Optional private key file path for DTLS", OFFSET(key_file), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, ENC },
+    { "whip_flags", "Set flags affecting WHIP connection behavior", OFFSET(flags), AV_OPT_TYPE_FLAGS,  { .i64 = 0 }, 0, 0, ENC, .unit = "flags" },
+    { "ignore_ipv6", "Ignore any IPv6 ICE candidate", 0, AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 }, 0, UINT_MAX, ENC, .unit = "flags" },
     { "disable_rtx", "Disable RFC 4588 RTX", 0, AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_DISABLE_RTX }, 0, UINT_MAX, ENC, .unit = "flags" },
     { NULL },
 };
