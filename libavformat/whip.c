@@ -200,7 +200,8 @@ enum WHIPState {
 };
 
 typedef enum WHIPFlags {
-    WHIP_FLAG_IGNORE_IPV6  = (1 << 0) // Ignore ipv6 candidate
+    WHIP_FLAG_IGNORE_IPV6  = (1 << 0), // Ignore ipv6 candidate
+    WHIP_FLAG_DISABLE_NACK_RTX     = (1 << 1)  // Enable NACK and RTX
 } WHIPFlags;
 
 typedef struct RtpHistoryItem {
@@ -331,9 +332,8 @@ typedef struct WHIPContext {
     uint32_t video_rtx_ssrc;
     uint16_t rtx_seq;
     int  history_size;
-    RtpHistoryItem * history;  /* ring buffer  */
+    RtpHistoryItem *history;  /* ring buffer  */
     int hist_head;
-    int enable_nack_rtx; /* TODO: using whip_flags */
 } WHIPContext;
 
 /**
@@ -640,7 +640,6 @@ static int generate_sdp_offer(AVFormatContext *s)
     whip->history = av_calloc(whip->history_size, sizeof(*whip->history));
     if (!whip->history)
             return AVERROR(ENOMEM);
-    whip->enable_nack_rtx = 1;
 
     av_bprintf(&bp, ""
         "v=0\r\n"
@@ -1489,7 +1488,7 @@ end:
  static void rtp_history_store(WHIPContext *whip, const uint8_t *pkt, int size)
 {
     int pos = whip->hist_head % whip->history_size;
-    RtpHistoryItem * it = &whip->history[pos];
+    RtpHistoryItem *it = &whip->history[pos];
     /* free older entry */
     av_free(it->pkt);   
     it->pkt = av_malloc(size);
@@ -1503,10 +1502,10 @@ end:
     whip->hist_head = ++pos;
 }
 
-static const RtpHistoryItem* rtp_history_find(const WHIPContext *whip, uint16_t seq)
+static const RtpHistoryItem *rtp_history_find(const WHIPContext *whip, uint16_t seq)
 {
     for (int i = 0; i < whip->history_size; i++) {
-        const RtpHistoryItem * it = &whip->history[i];
+        const RtpHistoryItem *it = &whip->history[i];
         if (it->pkt && it->seq == seq)
             return it;
     }
@@ -1565,12 +1564,11 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
  * See https://datatracker.ietf.org/doc/html/rfc4588
  * Build and send a single RTX packet
  */
-static int send_rtx_packet(AVFormatContext *s, const uint8_t * orig_pkt, int orig_size)
+static int send_rtx_packet(AVFormatContext *s, const uint8_t *orig_pkt, int orig_size)
 {
-    WHIPContext * whip = s->priv_data;
+    WHIPContext *whip = s->priv_data;
     int new_size, cipher_size;
-    /* skip if no RTX PT configured */
-    if (!whip->enable_nack_rtx)
+    if (whip->flags & WHIP_FLAG_DISABLE_NACK_RTX)
         return 0;
 
     /* allocate new buffer: header + 2 + payload */
@@ -1579,7 +1577,7 @@ static int send_rtx_packet(AVFormatContext *s, const uint8_t * orig_pkt, int ori
 
     memcpy(whip->buf, orig_pkt, orig_size);
 
-    uint8_t * hdr = whip->buf;
+    uint8_t *hdr = whip->buf;
     uint16_t orig_seq = AV_RB16(hdr + 2);
 
     /* rewrite header */
@@ -1933,7 +1931,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
             int ptr = 0;
             uint8_t pt = whip->buf[ptr + 1];
             uint8_t fmt = (whip->buf[ptr] & 0x1f);
-            if (ptr + 4 <= ret && pt == 205 && fmt == 1 ) {
+            if (ptr + 4 <= ret && pt == 205 && fmt == 1) {
                 /**
                  * Refer to RFC 3550, Section 6.4.1.
                  * The length of this RTCP packet in 32-bit words minus one,
@@ -1963,7 +1961,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                             if (bit >= 0 && !(blp & (1 << bit)))
                                 continue;
 
-                            const RtpHistoryItem * it = rtp_history_find(whip, seq);
+                            const RtpHistoryItem *it = rtp_history_find(whip, seq);
                             if (it) {
                                 ret = send_rtx_packet(s, it->pkt, it->size);
                                 av_log(whip, AV_LOG_VERBOSE, 
@@ -2093,6 +2091,8 @@ static const AVOption options[] = {
         AV_OPT_TYPE_FLAGS,  { .i64 = 0 },                           0, UINT_MAX, ENC, .unit = "flags" },
     { "ignore_ipv6",        "Ignore any IPv6 ICE candidate",                            0,
         AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 },       0, UINT_MAX, ENC, .unit = "flags" },
+    { "disable_nack_rtx",    "Enable NACK and RTX",                                      0,
+        AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_DISABLE_NACK_RTX },          0, UINT_MAX, ENC, .unit = "flags" },
     { NULL },
 };
 
