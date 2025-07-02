@@ -201,7 +201,7 @@ enum WHIPState {
 
 typedef enum WHIPFlags {
     WHIP_FLAG_IGNORE_IPV6  = (1 << 0), // Ignore ipv6 candidate
-    WHIP_FLAG_DISABLE_NACK_RTX     = (1 << 1)  // Enable NACK and RTX
+    WHIP_FLAG_DISABLE_RTX     = (1 << 1)  // Enable NACK and RTX
 } WHIPFlags;
 
 typedef struct RtpHistoryItem {
@@ -1568,7 +1568,7 @@ static int send_rtx_packet(AVFormatContext *s, const uint8_t *orig_pkt, int orig
 {
     WHIPContext *whip = s->priv_data;
     int new_size, cipher_size;
-    if (whip->flags & WHIP_FLAG_DISABLE_NACK_RTX)
+    if (whip->flags & WHIP_FLAG_DISABLE_RTX)
         return 0;
 
     /* allocate new buffer: header + 2 + payload */
@@ -1963,10 +1963,12 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
 
                             const RtpHistoryItem *it = rtp_history_find(whip, seq);
                             if (it) {
-                                ret = send_rtx_packet(s, it->pkt, it->size);
                                 av_log(whip, AV_LOG_VERBOSE, 
                                     "WHIP: NACK, packet found: size: %d, seq=%d, rtx size=%d, lateset stored packet seq:%d\n", 
                                     it->size, seq, ret, whip->history[whip->hist_head-1].seq);
+                                ret = send_rtx_packet(s, it->pkt, it->size);
+                                if (ret <= 0 && !(whip->flags & WHIP_FLAG_DISABLE_RTX))
+                                    av_log(whip, AV_LOG_ERROR, "WHIP: Failed to send RTX packet\n");
                             } else {
                                 av_log(whip, AV_LOG_VERBOSE,
                                     "WHIP: NACK, packet not found, seq=%d, latest stored packet seq: %d, latest rtx seq: %d\n",
@@ -2091,8 +2093,8 @@ static const AVOption options[] = {
         AV_OPT_TYPE_FLAGS,  { .i64 = 0 },                           0, UINT_MAX, ENC, .unit = "flags" },
     { "ignore_ipv6",        "Ignore any IPv6 ICE candidate",                            0,
         AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 },       0, UINT_MAX, ENC, .unit = "flags" },
-    { "disable_nack_rtx",    "Enable NACK and RTX",                                      0,
-        AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_DISABLE_NACK_RTX },          0, UINT_MAX, ENC, .unit = "flags" },
+    { "disable_rtx",    "Disable RFC 4588 RTX",                                         0,
+        AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_DISABLE_RTX },       0, UINT_MAX, ENC, .unit = "flags" },
     { NULL },
 };
 
