@@ -919,7 +919,9 @@ static int parse_answer(AVFormatContext *s)
             if (ptr && av_stristr(ptr, "host")) {
                 char protocol[17], host[129];
                 int priority, port;
+#if HAVE_STRUCT_SOCKADDR_IN6
                 struct in6_addr addr6;
+#endif
                 ret = sscanf(ptr, "%16s %d %128s %d typ host", protocol, &priority, host, &port);
                 if (ret != 4) {
                     av_log(whip, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s\n",
@@ -927,12 +929,12 @@ static int parse_answer(AVFormatContext *s)
                     ret = AVERROR(EIO);
                     goto end;
                 }
-
+#if HAVE_STRUCT_SOCKADDR_IN6
                 if (whip->flags & WHIP_FLAG_IGNORE_IPV6 && inet_pton(AF_INET6, host, &addr6) == 1) {
                     av_log(whip, AV_LOG_DEBUG, "Ignoring IPv6 ICE candidates %s, line %d %s \n", host, i, line);
                     continue;
                 }
-
+#endif
                 if (av_strcasecmp(protocol, "udp")) {
                     av_log(whip, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp, line %d %s of %s\n",
                         protocol, i, line, whip->sdp_answer);
