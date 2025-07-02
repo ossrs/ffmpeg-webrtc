@@ -114,6 +114,7 @@
 /* Referring to Chrome's definition of RTP payload types. */
 #define WHIP_RTP_PAYLOAD_TYPE_H264 106
 #define WHIP_RTP_PAYLOAD_TYPE_OPUS 111
+#define WHIP_RTP_PAYLOAD_TYPE_RTX  105
 
 /**
  * The STUN message header, which is 20 bytes long, comprises the
@@ -149,6 +150,11 @@
  */
 #define WHIP_SDP_SESSION_ID "4489045141692799359"
 #define WHIP_SDP_CREATOR_IP "127.0.0.1"
+
+/**
+ * Retransmission / NACK support
+*/
+#define HISTORY_SIZE_DEFAULT 512
 
 /* Calculate the elapsed time from starttime to endtime in milliseconds. */
 #define ELAPSED(starttime, endtime) ((int)(endtime - starttime) / 1000)
@@ -193,9 +199,24 @@ enum WHIPState {
     WHIP_STATE_FAILED,
 };
 
+typedef enum WHIPFlags {
+    WHIP_FLAG_IGNORE_IPV6  = (1 << 0), // Ignore ipv6 candidate
+    WHIP_FLAG_DISABLE_RTX     = (1 << 1)  // Enable NACK and RTX
+} WHIPFlags;
+
+typedef struct RtpHistoryItem {
+        /* original RTP seq */
+        uint16_t seq;
+        /* length in bytes */
+        int size;
+        /* malloc-ed copy */
+        uint8_t* buf;
+} RtpHistoryItem;
+
 typedef struct WHIPContext {
     AVClass *av_class;
 
+    uint32_t flags;        // enum WHIPFlags
     /* The state of the RTC connection. */
     enum WHIPState state;
     /* The callback return value for DTLS. */
@@ -205,6 +226,7 @@ typedef struct WHIPContext {
     /* Parameters for the input audio and video codecs. */
     AVCodecParameters *audio_par;
     AVCodecParameters *video_par;
+    uint8_t constraint_set_flags;
 
     /**
      * The h264_mp4toannexb Bitstream Filter (BSF) bypasses the AnnexB packet;
@@ -279,6 +301,7 @@ typedef struct WHIPContext {
     /* The SRTP send context, to encrypt outgoing packets. */
     SRTPContext srtp_audio_send;
     SRTPContext srtp_video_send;
+    SRTPContext srtp_video_rtx_send;
     SRTPContext srtp_rtcp_send;
     /* The SRTP receive context, to decrypt incoming packets. */
     SRTPContext srtp_recv;
@@ -303,6 +326,14 @@ typedef struct WHIPContext {
     /* The certificate and private key used for DTLS handshake. */
     char* cert_file;
     char* key_file;
+
+    /* RTX / NACK */
+    uint8_t rtx_payload_type;
+    uint32_t video_rtx_ssrc;
+    uint16_t rtx_seq;
+    int  history_size;
+    RtpHistoryItem *history;  /* ring buffer  */
+    int hist_head;
 } WHIPContext;
 
 /**
@@ -359,14 +390,14 @@ static int dtls_context_on_state(AVFormatContext *s, const char* type, const cha
 
     if (state == DTLS_STATE_CLOSED) {
         whip->dtls_closed = 1;
-        av_log(whip, AV_LOG_VERBOSE, "WHIP: DTLS session closed, type=%s, desc=%s, elapsed=%dms\n",
+        av_log(whip, AV_LOG_VERBOSE, "DTLS session closed, type=%s, desc=%s, elapsed=%dms\n",
             type ? type : "", desc ? desc : "", ELAPSED(whip->whip_starttime, av_gettime()));
         goto error;
     }
 
     if (state == DTLS_STATE_FAILED) {
         whip->state = WHIP_STATE_FAILED;
-        av_log(whip, AV_LOG_ERROR, "WHIP: DTLS session failed, type=%s, desc=%s\n",
+        av_log(whip, AV_LOG_ERROR, "DTLS session failed, type=%s, desc=%s\n",
             type ? type : "", desc ? desc : "");
         whip->dtls_ret = AVERROR(EIO);
         goto error;
@@ -375,7 +406,7 @@ static int dtls_context_on_state(AVFormatContext *s, const char* type, const cha
     if (state == DTLS_STATE_FINISHED && whip->state < WHIP_STATE_DTLS_FINISHED) {
         whip->state = WHIP_STATE_DTLS_FINISHED;
         whip->whip_dtls_time = av_gettime();
-        av_log(whip, AV_LOG_VERBOSE, "WHIP: DTLS handshake is done, elapsed=%dms\n",
+        av_log(whip, AV_LOG_VERBOSE, "DTLS handshake is done, elapsed=%dms\n",
             ELAPSED(whip->whip_starttime, av_gettime()));
         return ret;
     }
@@ -404,7 +435,7 @@ static av_cold int initialize(AVFormatContext *s)
 
     ret = certificate_key_init(s);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to init certificate and key\n");
+        av_log(whip, AV_LOG_ERROR, "Failed to init certificate and key\n");
         return ret;
     }
 
@@ -413,13 +444,13 @@ static av_cold int initialize(AVFormatContext *s)
     av_lfg_init(&whip->rnd, seed);
 
     if (whip->pkt_size < ideal_pkt_size)
-        av_log(whip, AV_LOG_WARNING, "WHIP: pkt_size=%d(<%d) is too small, may cause packet loss\n",
+        av_log(whip, AV_LOG_WARNING, "pkt_size=%d(<%d) is too small, may cause packet loss\n",
                whip->pkt_size, ideal_pkt_size);
 
     if (whip->state < WHIP_STATE_INIT)
         whip->state = WHIP_STATE_INIT;
     whip->whip_init_time = av_gettime();
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: Init state=%d, handshake_timeout=%dms, pkt_size=%d, seed=%d, elapsed=%dms\n",
+    av_log(whip, AV_LOG_VERBOSE, "Init state=%d, handshake_timeout=%dms, pkt_size=%d, seed=%d, elapsed=%dms\n",
         whip->state, whip->handshake_timeout, whip->pkt_size, seed, ELAPSED(whip->whip_starttime, av_gettime()));
 
     return 0;
@@ -440,45 +471,30 @@ static av_cold int initialize(AVFormatContext *s)
 static int parse_profile_level(AVFormatContext *s, AVCodecParameters *par)
 {
     int ret = 0;
-    const uint8_t *r = par->extradata, *r1, *end = par->extradata + par->extradata_size;
-    H264SPS seq, *const sps = &seq;
-    uint32_t state;
+    const uint8_t *r = par->extradata;
     WHIPContext *whip = s->priv_data;
 
     if (par->codec_id != AV_CODEC_ID_H264)
         return ret;
 
-    if (par->profile != AV_PROFILE_UNKNOWN && par->level != AV_LEVEL_UNKNOWN)
-        return ret;
-
     if (!par->extradata || par->extradata_size <= 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Unable to parse profile from empty extradata=%p, size=%d\n",
+        av_log(whip, AV_LOG_ERROR, "Unable to parse profile from empty extradata=%p, size=%d\n",
             par->extradata, par->extradata_size);
         return AVERROR(EINVAL);
     }
 
-    while (1) {
-        r = avpriv_find_start_code(r, end, &state);
-        if (r >= end)
-            break;
+    if (AV_RB32(r) == 0x00000001 && (r[4] & 0x1F) == 7)
+        r = &r[5];
+    else if (AV_RB24(r) == 0x000001 && (r[3] & 0x1F) == 7)
+        r = &r[4];
+    else if (r[0] == 0x01)  // avcC
+        r = &r[1];
+    else
+        return AVERROR(EINVAL);
 
-        r1 = ff_nal_find_startcode(r, end);
-        if ((state & 0x1f) == H264_NAL_SPS) {
-            ret = ff_avc_decode_sps(sps, r, r1 - r);
-            if (ret < 0) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Failed to decode SPS, state=%x, size=%d\n",
-                    state, (int)(r1 - r));
-                return ret;
-            }
-
-            av_log(whip, AV_LOG_VERBOSE, "WHIP: Parse profile=%d, level=%d from SPS\n",
-                sps->profile_idc, sps->level_idc);
-            par->profile = sps->profile_idc;
-            par->level = sps->level_idc;
-        }
-
-        r = r1;
-    }
+    if (par->profile == AV_PROFILE_UNKNOWN) par->profile = r[0];
+    whip->constraint_set_flags = r[1];
+    if (par->level == AV_LEVEL_UNKNOWN) par->level = r[2];
 
     return ret;
 }
@@ -515,62 +531,62 @@ static int parse_codec(AVFormatContext *s)
         switch (par->codec_type) {
         case AVMEDIA_TYPE_VIDEO:
             if (whip->video_par) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Only one video stream is supported by RTC\n");
+                av_log(whip, AV_LOG_ERROR, "Only one video stream is supported by RTC\n");
                 return AVERROR(EINVAL);
             }
             whip->video_par = par;
 
             if (par->codec_id != AV_CODEC_ID_H264) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Unsupported video codec %s by RTC, choose h264\n",
+                av_log(whip, AV_LOG_ERROR, "Unsupported video codec %s by RTC, choose h264\n",
                        desc ? desc->name : "unknown");
                 return AVERROR_PATCHWELCOME;
             }
 
             if (par->video_delay > 0) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Unsupported B frames by RTC\n");
+                av_log(whip, AV_LOG_ERROR, "Unsupported B frames by RTC\n");
                 return AVERROR_PATCHWELCOME;
             }
 
             if ((ret = parse_profile_level(s, par)) < 0) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Failed to parse SPS/PPS from extradata\n");
+                av_log(whip, AV_LOG_ERROR, "Failed to parse SPS/PPS from extradata\n");
                 return AVERROR(EINVAL);
             }
 
             if (par->profile == AV_PROFILE_UNKNOWN) {
-                av_log(whip, AV_LOG_WARNING, "WHIP: No profile found in extradata, consider baseline\n");
+                av_log(whip, AV_LOG_WARNING, "No profile found in extradata, consider baseline\n");
                 return AVERROR(EINVAL);
             }
             if (par->level == AV_LEVEL_UNKNOWN) {
-                av_log(whip, AV_LOG_WARNING, "WHIP: No level found in extradata, consider 3.1\n");
+                av_log(whip, AV_LOG_WARNING, "No level found in extradata, consider 3.1\n");
                 return AVERROR(EINVAL);
             }
             break;
         case AVMEDIA_TYPE_AUDIO:
             if (whip->audio_par) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Only one audio stream is supported by RTC\n");
+                av_log(whip, AV_LOG_ERROR, "Only one audio stream is supported by RTC\n");
                 return AVERROR(EINVAL);
             }
             whip->audio_par = par;
 
             if (par->codec_id != AV_CODEC_ID_OPUS) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Unsupported audio codec %s by RTC, choose opus\n",
+                av_log(whip, AV_LOG_ERROR, "Unsupported audio codec %s by RTC, choose opus\n",
                     desc ? desc->name : "unknown");
                 return AVERROR_PATCHWELCOME;
             }
 
             if (par->ch_layout.nb_channels != 2) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Unsupported audio channels %d by RTC, choose stereo\n",
+                av_log(whip, AV_LOG_ERROR, "Unsupported audio channels %d by RTC, choose stereo\n",
                     par->ch_layout.nb_channels);
                 return AVERROR_PATCHWELCOME;
             }
 
             if (par->sample_rate != 48000) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Unsupported audio sample rate %d by RTC, choose 48000\n", par->sample_rate);
+                av_log(whip, AV_LOG_ERROR, "Unsupported audio sample rate %d by RTC, choose 48000\n", par->sample_rate);
                 return AVERROR_PATCHWELCOME;
             }
             break;
         default:
-            av_log(whip, AV_LOG_ERROR, "WHIP: Codec type '%s' for stream %d is not supported by RTC\n",
+            av_log(whip, AV_LOG_ERROR, "Codec type '%s' for stream %d is not supported by RTC\n",
                    av_get_media_type_string(par->codec_type), i);
             return AVERROR_PATCHWELCOME;
         }
@@ -589,7 +605,7 @@ static int parse_codec(AVFormatContext *s)
  */
 static int generate_sdp_offer(AVFormatContext *s)
 {
-    int ret = 0, profile, level, profile_iop;
+    int ret = 0, profile, level;
     const char *acodec_name = NULL, *vcodec_name = NULL;
     AVBPrint bp;
     WHIPContext *whip = s->priv_data;
@@ -598,7 +614,7 @@ static int generate_sdp_offer(AVFormatContext *s)
     av_bprint_init(&bp, 1, MAX_SDP_SIZE);
 
     if (whip->sdp_offer) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: SDP offer is already set\n");
+        av_log(whip, AV_LOG_ERROR, "SDP offer is already set\n");
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -614,6 +630,16 @@ static int generate_sdp_offer(AVFormatContext *s)
 
     whip->audio_payload_type = WHIP_RTP_PAYLOAD_TYPE_OPUS;
     whip->video_payload_type = WHIP_RTP_PAYLOAD_TYPE_H264;
+
+    /* RTX and NACK init */
+    whip->rtx_payload_type = WHIP_RTP_PAYLOAD_TYPE_RTX;
+    whip->video_rtx_ssrc = av_lfg_get(&whip->rnd);
+    whip->rtx_seq = 0;
+    whip->hist_head = 0;
+    whip->history_size = FFMAX(64, whip->history_size);
+    whip->history = av_calloc(whip->history_size, sizeof(*whip->history));
+    if (!whip->history)
+            return AVERROR(ENOMEM);
 
     av_bprintf(&bp, ""
         "v=0\r\n"
@@ -657,16 +683,15 @@ static int generate_sdp_offer(AVFormatContext *s)
     }
 
     if (whip->video_par) {
-        profile_iop = profile = whip->video_par->profile;
+        profile = whip->video_par->profile;
         level = whip->video_par->level;
         if (whip->video_par->codec_id == AV_CODEC_ID_H264) {
             vcodec_name = "H264";
-            profile_iop &= AV_PROFILE_H264_CONSTRAINED;
             profile &= (~AV_PROFILE_H264_CONSTRAINED);
         }
 
         av_bprintf(&bp, ""
-            "m=video 9 UDP/TLS/RTP/SAVPF %u\r\n"
+            "m=video 9 UDP/TLS/RTP/SAVPF %u %u\r\n"
             "c=IN IP4 0.0.0.0\r\n"
             "a=ice-ufrag:%s\r\n"
             "a=ice-pwd:%s\r\n"
@@ -679,9 +704,16 @@ static int generate_sdp_offer(AVFormatContext *s)
             "a=rtcp-rsize\r\n"
             "a=rtpmap:%u %s/90000\r\n"
             "a=fmtp:%u level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=%02x%02x%02x\r\n"
+            "a=rtcp-fb:%u nack\r\n"
+            "a=rtpmap:%u rtx/90000\r\n"
+            "a=fmtp:%u apt=%u\r\n"
+            "a=ssrc-group:FID %u %u\r\n"
+            "a=ssrc:%u cname:FFmpeg\r\n"
+            "a=ssrc:%u msid:FFmpeg video\r\n"
             "a=ssrc:%u cname:FFmpeg\r\n"
             "a=ssrc:%u msid:FFmpeg video\r\n",
             whip->video_payload_type,
+            whip->rtx_payload_type,
             whip->ice_ufrag_local,
             whip->ice_pwd_local,
             whip->dtls_fingerprint,
@@ -689,14 +721,22 @@ static int generate_sdp_offer(AVFormatContext *s)
             vcodec_name,
             whip->video_payload_type,
             profile,
-            profile_iop,
+            whip->constraint_set_flags,
             level,
+            whip->video_payload_type,
+            whip->rtx_payload_type,
+            whip->rtx_payload_type,
+            whip->video_payload_type,
             whip->video_ssrc,
-            whip->video_ssrc);
+            whip->video_rtx_ssrc,
+            whip->video_ssrc,
+            whip->video_ssrc,
+            whip->video_rtx_ssrc,
+            whip->video_rtx_ssrc);
     }
 
     if (!av_bprint_is_complete(&bp)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Offer exceed max %d, %s\n", MAX_SDP_SIZE, bp.str);
+        av_log(whip, AV_LOG_ERROR, "Offer exceed max %d, %s\n", MAX_SDP_SIZE, bp.str);
         ret = AVERROR(EIO);
         goto end;
     }
@@ -710,7 +750,7 @@ static int generate_sdp_offer(AVFormatContext *s)
     if (whip->state < WHIP_STATE_OFFER)
         whip->state = WHIP_STATE_OFFER;
     whip->whip_offer_time = av_gettime();
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: Generated state=%d, offer: %s\n", whip->state, whip->sdp_offer);
+    av_log(whip, AV_LOG_VERBOSE, "Generated state=%d, offer: %s\n", whip->state, whip->sdp_offer);
 
 end:
     av_bprint_finalize(&bp, NULL);
@@ -745,7 +785,7 @@ static int exchange_sdp(AVFormatContext *s)
     }
 
     if (!whip->sdp_offer || !strlen(whip->sdp_offer)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: No offer to exchange\n");
+        av_log(whip, AV_LOG_ERROR, "No offer to exchange\n");
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -754,7 +794,7 @@ static int exchange_sdp(AVFormatContext *s)
     if (whip->authorization)
         ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", whip->authorization);
     if (ret <= 0 || ret >= sizeof(buf)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to generate headers, size=%d, %s\n", ret, buf);
+        av_log(whip, AV_LOG_ERROR, "Failed to generate headers, size=%d, %s\n", ret, buf);
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -773,7 +813,7 @@ static int exchange_sdp(AVFormatContext *s)
     ret = ffurl_open_whitelist(&whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
         &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to request url=%s, offer: %s\n", s->url, whip->sdp_offer);
+        av_log(whip, AV_LOG_ERROR, "Failed to request url=%s, offer: %s\n", s->url, whip->sdp_offer);
         goto end;
     }
 
@@ -793,21 +833,21 @@ static int exchange_sdp(AVFormatContext *s)
             break;
         }
         if (ret <= 0) {
-            av_log(whip, AV_LOG_ERROR, "WHIP: Failed to read response from url=%s, offer is %s, answer is %s\n",
+            av_log(whip, AV_LOG_ERROR, "Failed to read response from url=%s, offer is %s, answer is %s\n",
                 s->url, whip->sdp_offer, whip->sdp_answer);
             goto end;
         }
 
         av_bprintf(&bp, "%.*s", ret, buf);
         if (!av_bprint_is_complete(&bp)) {
-            av_log(whip, AV_LOG_ERROR, "WHIP: Answer exceed max size %d, %.*s, %s\n", MAX_SDP_SIZE, ret, buf, bp.str);
+            av_log(whip, AV_LOG_ERROR, "Answer exceed max size %d, %.*s, %s\n", MAX_SDP_SIZE, ret, buf, bp.str);
             ret = AVERROR(EIO);
             goto end;
         }
     }
 
     if (!av_strstart(bp.str, "v=", NULL)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Invalid answer: %s\n", bp.str);
+        av_log(whip, AV_LOG_ERROR, "Invalid answer: %s\n", bp.str);
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -820,7 +860,7 @@ static int exchange_sdp(AVFormatContext *s)
 
     if (whip->state < WHIP_STATE_ANSWER)
         whip->state = WHIP_STATE_ANSWER;
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: Got state=%d, answer: %s\n", whip->state, whip->sdp_answer);
+    av_log(whip, AV_LOG_VERBOSE, "Got state=%d, answer: %s\n", whip->state, whip->sdp_answer);
 
 end:
     ffurl_closep(&whip_uc);
@@ -851,7 +891,7 @@ static int parse_answer(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
 
     if (!whip->sdp_answer || !strlen(whip->sdp_answer)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: No answer to parse\n");
+        av_log(whip, AV_LOG_ERROR, "No answer to parse\n");
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -879,16 +919,24 @@ static int parse_answer(AVFormatContext *s)
             if (ptr && av_stristr(ptr, "host")) {
                 char protocol[17], host[129];
                 int priority, port;
+#if HAVE_STRUCT_SOCKADDR_IN6
+                struct in6_addr addr6;
+#endif
                 ret = sscanf(ptr, "%16s %d %128s %d typ host", protocol, &priority, host, &port);
                 if (ret != 4) {
-                    av_log(whip, AV_LOG_ERROR, "WHIP: Failed %d to parse line %d %s from %s\n",
+                    av_log(whip, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s\n",
                         ret, i, line, whip->sdp_answer);
                     ret = AVERROR(EIO);
                     goto end;
                 }
-
+#if HAVE_STRUCT_SOCKADDR_IN6
+                if (whip->flags & WHIP_FLAG_IGNORE_IPV6 && inet_pton(AF_INET6, host, &addr6) == 1) {
+                    av_log(whip, AV_LOG_DEBUG, "Ignoring IPv6 ICE candidates %s, line %d %s \n", host, i, line);
+                    continue;
+                }
+#endif
                 if (av_strcasecmp(protocol, "udp")) {
-                    av_log(whip, AV_LOG_ERROR, "WHIP: Protocol %s is not supported by RTC, choose udp, line %d %s of %s\n",
+                    av_log(whip, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp, line %d %s of %s\n",
                         protocol, i, line, whip->sdp_answer);
                     ret = AVERROR(EIO);
                     goto end;
@@ -906,19 +954,19 @@ static int parse_answer(AVFormatContext *s)
     }
 
     if (!whip->ice_pwd_remote || !strlen(whip->ice_pwd_remote)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: No remote ice pwd parsed from %s\n", whip->sdp_answer);
+        av_log(whip, AV_LOG_ERROR, "No remote ice pwd parsed from %s\n", whip->sdp_answer);
         ret = AVERROR(EINVAL);
         goto end;
     }
 
     if (!whip->ice_ufrag_remote || !strlen(whip->ice_ufrag_remote)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: No remote ice ufrag parsed from %s\n", whip->sdp_answer);
+        av_log(whip, AV_LOG_ERROR, "No remote ice ufrag parsed from %s\n", whip->sdp_answer);
         ret = AVERROR(EINVAL);
         goto end;
     }
 
     if (!whip->ice_protocol || !whip->ice_host || !whip->ice_port) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: No ice candidate parsed from %s\n", whip->sdp_answer);
+        av_log(whip, AV_LOG_ERROR, "No ice candidate parsed from %s\n", whip->sdp_answer);
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -926,7 +974,7 @@ static int parse_answer(AVFormatContext *s)
     if (whip->state < WHIP_STATE_NEGOTIATED)
         whip->state = WHIP_STATE_NEGOTIATED;
     whip->whip_answer_time = av_gettime();
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: SDP state=%d, offer=%luB, answer=%luB, ufrag=%s, pwd=%luB, transport=%s://%s:%d, elapsed=%dms\n",
+    av_log(whip, AV_LOG_VERBOSE, "SDP state=%d, offer=%luB, answer=%luB, ufrag=%s, pwd=%luB, transport=%s://%s:%d, elapsed=%dms\n",
         whip->state, strlen(whip->sdp_offer), strlen(whip->sdp_answer), whip->ice_ufrag_remote, strlen(whip->ice_pwd_remote),
         whip->ice_protocol, whip->ice_host, whip->ice_port, ELAPSED(whip->whip_starttime, av_gettime()));
 
@@ -977,7 +1025,7 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     /* The username is the concatenation of the two ICE ufrag */
     ret = snprintf(username, sizeof(username), "%s:%s", whip->ice_ufrag_remote, whip->ice_ufrag_local);
     if (ret <= 0 || ret >= sizeof(username)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to build username %s:%s, max=%lu, ret=%d\n",
+        av_log(whip, AV_LOG_ERROR, "Failed to build username %s:%s, max=%lu, ret=%d\n",
             whip->ice_ufrag_remote, whip->ice_ufrag_local, sizeof(username), ret);
         ret = AVERROR(EIO);
         goto end;
@@ -1046,7 +1094,7 @@ static int ice_create_response(AVFormatContext *s, char *tid, int tid_size, uint
     WHIPContext *whip = s->priv_data;
 
     if (tid_size != 12) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Invalid transaction ID size. Expected 12, got %d\n", tid_size);
+        av_log(whip, AV_LOG_ERROR, "Invalid transaction ID size. Expected 12, got %d\n", tid_size);
         return AVERROR(EINVAL);
     }
 
@@ -1149,7 +1197,7 @@ static int ice_handle_binding_request(AVFormatContext *s, char *buf, int buf_siz
         return ret;
 
     if (buf_size < ICE_STUN_HEADER_SIZE) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Invalid STUN message, expected at least %d, got %d\n",
+        av_log(whip, AV_LOG_ERROR, "Invalid STUN message, expected at least %d, got %d\n",
             ICE_STUN_HEADER_SIZE, buf_size);
         return AVERROR(EINVAL);
     }
@@ -1160,13 +1208,13 @@ static int ice_handle_binding_request(AVFormatContext *s, char *buf, int buf_siz
     /* Build the STUN binding response. */
     ret = ice_create_response(s, tid, sizeof(tid), whip->buf, sizeof(whip->buf), &size);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to create STUN binding response, size=%d\n", size);
+        av_log(whip, AV_LOG_ERROR, "Failed to create STUN binding response, size=%d\n", size);
         return ret;
     }
 
     ret = ffurl_write(whip->udp, whip->buf, size);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to send STUN binding response, size=%d\n", size);
+        av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding response, size=%d\n", size);
         return ret;
     }
 
@@ -1196,7 +1244,7 @@ static int udp_connect(AVFormatContext *s)
     ret = ffurl_open_whitelist(&whip->udp, url, AVIO_FLAG_WRITE, &s->interrupt_callback,
         &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to connect udp://%s:%d\n", whip->ice_host, whip->ice_port);
+        av_log(whip, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", whip->ice_host, whip->ice_port);
         goto end;
     }
 
@@ -1207,7 +1255,7 @@ static int udp_connect(AVFormatContext *s)
     if (whip->state < WHIP_STATE_UDP_CONNECTED)
         whip->state = WHIP_STATE_UDP_CONNECTED;
     whip->whip_udp_time = av_gettime();
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: UDP state=%d, elapsed=%dms, connected to udp://%s:%d\n",
+    av_log(whip, AV_LOG_VERBOSE, "UDP state=%d, elapsed=%dms, connected to udp://%s:%d\n",
         whip->state, ELAPSED(whip->whip_starttime, av_gettime()), whip->ice_host, whip->ice_port);
 
 end:
@@ -1225,7 +1273,7 @@ static int ice_dtls_handshake(AVFormatContext *s)
     char buf[256], *cert_buf = NULL, *key_buf = NULL;
 
     if (whip->state < WHIP_STATE_UDP_CONNECTED || !whip->udp) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: UDP not connected, state=%d, udp=%p\n", whip->state, whip->udp);
+        av_log(whip, AV_LOG_ERROR, "UDP not connected, state=%d, udp=%p\n", whip->state, whip->udp);
         return AVERROR(EINVAL);
     }
 
@@ -1234,13 +1282,13 @@ static int ice_dtls_handshake(AVFormatContext *s)
             /* Build the STUN binding request. */
             ret = ice_create_request(s, whip->buf, sizeof(whip->buf), &size);
             if (ret < 0) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Failed to create STUN binding request, size=%d\n", size);
+                av_log(whip, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
                 goto end;
             }
 
             ret = ffurl_write(whip->udp, whip->buf, size);
             if (ret < 0) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Failed to send STUN binding request, size=%d\n", size);
+                av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
                 goto end;
             }
 
@@ -1255,7 +1303,7 @@ next_packet:
 
         now = av_gettime();
         if (now - starttime >= whip->handshake_timeout * 1000) {
-            av_log(whip, AV_LOG_ERROR, "WHIP: DTLS handshake timeout=%dms, cost=%dms, elapsed=%dms, state=%d\n",
+            av_log(whip, AV_LOG_ERROR, "DTLS handshake timeout=%dms, cost=%dms, elapsed=%dms, state=%d\n",
                 whip->handshake_timeout, ELAPSED(starttime, now), ELAPSED(whip->whip_starttime, now), whip->state);
             ret = AVERROR(ETIMEDOUT);
             goto end;
@@ -1270,7 +1318,7 @@ next_packet:
                 av_usleep(5 * 1000);
                 continue;
             }
-            av_log(whip, AV_LOG_ERROR, "WHIP: Failed to read message\n");
+            av_log(whip, AV_LOG_ERROR, "Failed to read message\n");
             goto end;
         }
 
@@ -1283,7 +1331,7 @@ next_packet:
             if (whip->state < WHIP_STATE_ICE_CONNECTED) {
                 whip->state = WHIP_STATE_ICE_CONNECTED;
                 whip->whip_ice_time = av_gettime();
-                av_log(whip, AV_LOG_VERBOSE, "WHIP: ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%dms\n",
+                av_log(whip, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%dms\n",
                     whip->state, whip->ice_host, whip->ice_port, whip->whip_resource_url ? whip->whip_resource_url : "",
                     whip->ice_ufrag_remote, whip->ice_ufrag_local, ret, ELAPSED(whip->whip_starttime, av_gettime()));
 
@@ -1383,20 +1431,26 @@ static int setup_srtp(AVFormatContext *s)
 
     /* Setup SRTP context for outgoing packets */
     if (!av_base64_encode(buf, sizeof(buf), send_key, sizeof(send_key))) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to encode send key\n");
+        av_log(whip, AV_LOG_ERROR, "Failed to encode send key\n");
         ret = AVERROR(EIO);
         goto end;
     }
 
     ret = ff_srtp_set_crypto(&whip->srtp_audio_send, suite, buf);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to set crypto for audio send\n");
+        av_log(whip, AV_LOG_ERROR, "Failed to set crypto for audio send\n");
         goto end;
     }
 
     ret = ff_srtp_set_crypto(&whip->srtp_video_send, suite, buf);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to set crypto for video send\n");
+        av_log(whip, AV_LOG_ERROR, "Failed to set crypto for video send\n");
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&whip->srtp_video_rtx_send, suite, buf);
+    if (ret < 0) {
+        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to set crypto for video rtx send\n");
         goto end;
     }
 
@@ -1408,25 +1462,56 @@ static int setup_srtp(AVFormatContext *s)
 
     /* Setup SRTP context for incoming packets */
     if (!av_base64_encode(buf, sizeof(buf), recv_key, sizeof(recv_key))) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to encode recv key\n");
+        av_log(whip, AV_LOG_ERROR, "Failed to encode recv key\n");
         ret = AVERROR(EIO);
         goto end;
     }
 
     ret = ff_srtp_set_crypto(&whip->srtp_recv, suite, buf);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to set crypto for recv\n");
+        av_log(whip, AV_LOG_ERROR, "Failed to set crypto for recv\n");
         goto end;
     }
 
     if (whip->state < WHIP_STATE_SRTP_FINISHED)
         whip->state = WHIP_STATE_SRTP_FINISHED;
     whip->whip_srtp_time = av_gettime();
-    av_log(whip, AV_LOG_VERBOSE, "WHIP: SRTP setup done, state=%d, suite=%s, key=%luB, elapsed=%dms\n",
+    av_log(whip, AV_LOG_VERBOSE, "SRTP setup done, state=%d, suite=%s, key=%luB, elapsed=%dms\n",
         whip->state, suite, sizeof(send_key), ELAPSED(whip->whip_starttime, av_gettime()));
 
 end:
     return ret;
+}
+
+
+/**
+ * RTX history helpers
+ */
+ static void rtp_history_store(WHIPContext *whip, const uint8_t *buf, int size)
+{
+    int pos = whip->hist_head % whip->history_size;
+    RtpHistoryItem *it = &whip->history[pos];
+    /* free older entry */
+    av_free(it->buf);
+    it->buf = av_malloc(size);
+    if (!it->buf)
+        return;
+
+    memcpy(it->buf, buf, size);
+    it->size = size;
+    it->seq = AV_RB16(buf + 2);
+
+    whip->hist_head = ++pos;
+}
+
+static const RtpHistoryItem *rtp_history_find(const WHIPContext *whip, uint16_t seq)
+{
+    for (int i = 0; i < whip->history_size; i++) {
+        const RtpHistoryItem *it = &whip->history[i];
+        if (it->buf && it->seq == seq)
+            return it;
+    }
+    return NULL;
 }
 
 /**
@@ -1461,17 +1546,60 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
     /* Encrypt by SRTP and send out. */
     cipher_size = ff_srtp_encrypt(srtp, buf, buf_size, whip->buf, sizeof(whip->buf));
     if (cipher_size <= 0 || cipher_size < buf_size) {
-        av_log(whip, AV_LOG_WARNING, "WHIP: Failed to encrypt packet=%dB, cipher=%dB\n", buf_size, cipher_size);
+        av_log(whip, AV_LOG_WARNING, "Failed to encrypt packet=%dB, cipher=%dB\n", buf_size, cipher_size);
         return 0;
     }
 
+    /* Store only ORIGINAL video packets (non-RTX, non-RTCP) */
+    if (!is_rtcp && is_video)
+        rtp_history_store(whip, buf, buf_size);
+
     ret = ffurl_write(whip->udp, whip->buf, cipher_size);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to write packet=%dB, ret=%d\n", cipher_size, ret);
+        av_log(whip, AV_LOG_ERROR, "Failed to write packet=%dB, ret=%d\n", cipher_size, ret);
         return ret;
     }
 
     return ret;
+}
+/**
+ * See https://datatracker.ietf.org/doc/html/rfc4588
+ * Build and send a single RTX packet
+ */
+static int send_rtx_packet(AVFormatContext *s, const uint8_t *orig_pkt_buf, int orig_size)
+{
+    WHIPContext *whip = s->priv_data;
+    int new_size, cipher_size;
+    if (whip->flags & WHIP_FLAG_DISABLE_RTX)
+        return 0;
+
+    /* allocate new buffer: header + 2 + payload */
+    if (orig_size + 2 > sizeof(whip->buf))
+        return 0;
+
+    memcpy(whip->buf, orig_pkt_buf, orig_size);
+
+    uint8_t *hdr = whip->buf;
+    uint16_t orig_seq = AV_RB16(hdr + 2);
+
+    /* rewrite header */
+    hdr[1] = (hdr[1] & 0x80) | whip->rtx_payload_type; /* keep M bit */
+    AV_WB16(hdr + 2, whip->rtx_seq++);
+    AV_WB32(hdr + 8, whip->video_rtx_ssrc);
+
+    /* shift payload 2 bytes */
+    memmove(hdr + 12 + 2, hdr + 12, orig_size - 12);
+    AV_WB16(hdr + 12, orig_seq);
+
+    new_size = orig_size + 2;
+
+    /* Encrypt by SRTP and send out. */
+    cipher_size = ff_srtp_encrypt(&whip->srtp_video_rtx_send, whip->buf, new_size, whip->buf, sizeof(whip->buf));
+    if (cipher_size <= 0 || cipher_size < new_size) {
+        av_log(whip, AV_LOG_WARNING, "WHIP: Failed to encrypt packet=%dB, cipher=%dB\n", new_size, cipher_size);
+        return 0;
+    }
+    return ffurl_write(whip->udp, whip->buf, cipher_size);
 }
 
 /**
@@ -1496,7 +1624,7 @@ static int create_rtp_muxer(AVFormatContext *s)
 
     const AVOutputFormat *rtp_format = av_guess_format("rtp", NULL, NULL);
     if (!rtp_format) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to guess rtp muxer\n");
+        av_log(whip, AV_LOG_ERROR, "Failed to guess rtp muxer\n");
         ret = AVERROR(ENOSYS);
         goto end;
     }
@@ -1564,7 +1692,7 @@ static int create_rtp_muxer(AVFormatContext *s)
 
         ret = avformat_write_header(rtp_ctx, &opts);
         if (ret < 0) {
-            av_log(whip, AV_LOG_ERROR, "WHIP: Failed to write rtp header\n");
+            av_log(whip, AV_LOG_ERROR, "Failed to write rtp header\n");
             goto end;
         }
 
@@ -1576,7 +1704,7 @@ static int create_rtp_muxer(AVFormatContext *s)
 
     if (whip->state < WHIP_STATE_READY)
         whip->state = WHIP_STATE_READY;
-    av_log(whip, AV_LOG_INFO, "WHIP: Muxer state=%d, buffer_size=%d, max_packet_size=%d, "
+    av_log(whip, AV_LOG_INFO, "Muxer state=%d, buffer_size=%d, max_packet_size=%d, "
                            "elapsed=%dms(init:%d,offer:%d,answer:%d,udp:%d,ice:%d,dtls:%d,srtp:%d)\n",
         whip->state, buffer_size, max_packet_size, ELAPSED(whip->whip_starttime, av_gettime()),
         ELAPSED(whip->whip_starttime,   whip->whip_init_time),
@@ -1618,7 +1746,7 @@ static int dispose_session(AVFormatContext *s)
     if (whip->authorization)
         ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", whip->authorization);
     if (ret <= 0 || ret >= sizeof(buf)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to generate headers, size=%d, %s\n", ret, buf);
+        av_log(whip, AV_LOG_ERROR, "Failed to generate headers, size=%d, %s\n", ret, buf);
         ret = AVERROR(EINVAL);
         goto end;
     }
@@ -1629,7 +1757,7 @@ static int dispose_session(AVFormatContext *s)
     ret = ffurl_open_whitelist(&whip_uc, whip->whip_resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
         &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to DELETE url=%s\n", whip->whip_resource_url);
+        av_log(whip, AV_LOG_ERROR, "Failed to DELETE url=%s\n", whip->whip_resource_url);
         goto end;
     }
 
@@ -1640,12 +1768,12 @@ static int dispose_session(AVFormatContext *s)
             break;
         }
         if (ret < 0) {
-            av_log(whip, AV_LOG_ERROR, "WHIP: Failed to read response from DELETE url=%s\n", whip->whip_resource_url);
+            av_log(whip, AV_LOG_ERROR, "Failed to read response from DELETE url=%s\n", whip->whip_resource_url);
             goto end;
         }
     }
 
-    av_log(whip, AV_LOG_INFO, "WHIP: Dispose resource %s ok\n", whip->whip_resource_url);
+    av_log(whip, AV_LOG_INFO, "Dispose resource %s ok\n", whip->whip_resource_url);
 
 end:
     ffurl_closep(&whip_uc);
@@ -1791,18 +1919,78 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
     if (ret > 0) {
         if (is_dtls_packet(whip->buf, ret)) {
             if ((ret = ffurl_write(whip->dtls_uc, whip->buf, ret)) < 0) {
-                av_log(whip, AV_LOG_ERROR, "WHIP: Failed to handle DTLS message\n");
+                av_log(whip, AV_LOG_ERROR, "Failed to handle DTLS message\n");
                 goto end;
             }
         }
+        /**
+         * Handle RTCP NACK
+         * Refer to RFC 4585, Section 6.2.1
+         * The Generic NACK message is identified by PT=RTPFB and FMT=1.
+         * TODO: disable retransmisstion when "-tune zerolatency"
+         */
+        if (media_is_rtcp(whip->buf, ret)) {
+            int ptr = 0;
+            uint8_t pt = whip->buf[ptr + 1];
+            uint8_t fmt = (whip->buf[ptr] & 0x1f);
+            if (ptr + 4 <= ret && pt == 205 && fmt == 1) {
+                /**
+                 * Refer to RFC 3550, Section 6.4.1.
+                 * The length of this RTCP packet in 32-bit words minus one,
+                 * including the header and any padding.
+                 */
+                int rtcp_len = (AV_RB16(&whip->buf[ptr + 2]) + 1) * 4;
+                /* SRTCP index(4 bytes) + HMAC (SRTP_AES128_CM_SHA1_80 10bytes) */
+                int srtcp_len = rtcp_len + 4 + 10;
+                if (srtcp_len == ret && rtcp_len >= 12) {
+                    int i = 0;
+                    uint8_t *pkt = av_malloc(srtcp_len);
+                    memcpy(pkt, whip->buf, srtcp_len);
+                    int ret = ff_srtp_decrypt(&whip->srtp_recv, pkt, &srtcp_len);
+                    if (ret < 0)
+                        av_log(whip, AV_LOG_ERROR, "WHIP: SRTCP decrypt failed: %d\n", ret);
+                    while (12 + i < rtcp_len && ret == 0) {
+                        /**
+                         *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1
+                         *  Handle multi NACKs in bundled packet.
+                         */
+                        uint16_t pid = AV_RB16(&pkt[ptr + 12 + i]);
+                        uint16_t blp = AV_RB16(&pkt[ptr + 14 + i]);
+
+                        /* retransmit pid + any bit set in blp */
+                        for (int bit = -1; bit < 16; bit++) {
+                            uint16_t seq = (bit < 0) ? pid : pid + bit + 1;
+                            if (bit >= 0 && !(blp & (1 << bit)))
+                                continue;
+
+                            const RtpHistoryItem *it = rtp_history_find(whip, seq);
+                            if (it) {
+                                av_log(whip, AV_LOG_VERBOSE,
+                                    "WHIP: NACK, packet found: size: %d, seq=%d, rtx size=%d, lateset stored packet seq:%d\n",
+                                    it->size, seq, ret, whip->history[whip->hist_head-1].seq);
+                                ret = send_rtx_packet(s, it->buf, it->size);
+                                if (ret <= 0 && !(whip->flags & WHIP_FLAG_DISABLE_RTX))
+                                    av_log(whip, AV_LOG_ERROR, "WHIP: Failed to send RTX packet\n");
+                            } else {
+                                av_log(whip, AV_LOG_VERBOSE,
+                                    "WHIP: NACK, packet not found, seq=%d, latest stored packet seq: %d, latest rtx seq: %d\n",
+                                    seq, whip->history[whip->hist_head-1].seq, whip->rtx_seq);
+                            }
+                        }
+                        i = i + 4;
+                    }
+                    av_free(pkt);
+                }
+            }
+        }
     } else if (ret != AVERROR(EAGAIN)) {
-        av_log(whip, AV_LOG_ERROR, "WHIP: Failed to read from UDP socket\n");
+        av_log(whip, AV_LOG_ERROR, "Failed to read from UDP socket\n");
         goto end;
     }
 
     if (whip->h264_annexb_insert_sps_pps && st->codecpar->codec_id == AV_CODEC_ID_H264) {
         if ((ret = h264_annexb_insert_sps_pps(s, pkt)) < 0) {
-            av_log(whip, AV_LOG_ERROR, "WHIP: Failed to insert SPS/PPS before IDR\n");
+            av_log(whip, AV_LOG_ERROR, "Failed to insert SPS/PPS before IDR\n");
             goto end;
         }
     }
@@ -1810,10 +1998,10 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
     ret = ff_write_chained(rtp_ctx, 0, pkt, s, 0);
     if (ret < 0) {
         if (ret == AVERROR(EINVAL)) {
-            av_log(whip, AV_LOG_WARNING, "WHIP: Ignore failed to write packet=%dB, ret=%d\n", pkt->size, ret);
+            av_log(whip, AV_LOG_WARNING, "Ignore failed to write packet=%dB, ret=%d\n", pkt->size, ret);
             ret = 0;
         } else
-            av_log(whip, AV_LOG_ERROR, "WHIP: Failed to write packet, size=%d\n", pkt->size);
+            av_log(whip, AV_LOG_ERROR, "Failed to write packet, size=%d\n", pkt->size);
         goto end;
     }
 
@@ -1834,7 +2022,7 @@ static av_cold void whip_deinit(AVFormatContext *s)
 
     ret = dispose_session(s);
     if (ret < 0)
-        av_log(whip, AV_LOG_WARNING, "WHIP: Failed to dispose resource, ret=%d\n", ret);
+        av_log(whip, AV_LOG_WARNING, "Failed to dispose resource, ret=%d\n", ret);
 
     for (i = 0; i < s->nb_streams; i++) {
         AVFormatContext* rtp_ctx = s->streams[i]->priv_data;
@@ -1881,7 +2069,7 @@ static int whip_check_bitstream(AVFormatContext *s, AVStream *st, const AVPacket
         extradata_isom = st->codecpar->extradata_size > 0 && st->codecpar->extradata[0] == 1;
         if (pkt->size >= 5 && AV_RB32(b) != 0x0000001 && (AV_RB24(b) != 0x000001 || extradata_isom)) {
             ret = ff_stream_add_bitstream_filter(st, "h264_mp4toannexb", NULL);
-            av_log(whip, AV_LOG_VERBOSE, "WHIP: Enable BSF h264_mp4toannexb, packet=[%x %x %x %x %x ...], extradata_isom=%d\n",
+            av_log(whip, AV_LOG_VERBOSE, "Enable BSF h264_mp4toannexb, packet=[%x %x %x %x %x ...], extradata_isom=%d\n",
                 b[0], b[1], b[2], b[3], b[4], extradata_isom);
         } else
             whip->h264_annexb_insert_sps_pps = 1;
@@ -1893,11 +2081,15 @@ static int whip_check_bitstream(AVFormatContext *s, AVStream *st, const AVPacket
 #define OFFSET(x) offsetof(WHIPContext, x)
 #define ENC AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption options[] = {
-    { "handshake_timeout",  "Timeout in milliseconds for ICE and DTLS handshake.",      OFFSET(handshake_timeout),  AV_OPT_TYPE_INT,    { .i64 = 5000 },    -1, INT_MAX, ENC },
-    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, ENC },
-    { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
-    { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
-    { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
+    { "handshake_timeout", "Timeout in milliseconds for ICE and DTLS handshake.", OFFSET(handshake_timeout), AV_OPT_TYPE_INT,  { .i64 = 5000 }, -1, INT_MAX, ENC },
+    { "pkt_size", "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size), AV_OPT_TYPE_INT,  { .i64 = 1200 }, -1, INT_MAX, ENC },
+    { "authorization", "Optional Bearer token for WHIP Authorization", OFFSET(authorization), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, ENC },
+    { "cert_file", "Optional certificate file path for DTLS", OFFSET(cert_file), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, ENC },
+    { "key_file", "Optional private key file path for DTLS", OFFSET(key_file), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, ENC },
+    { "whip_flags", "Set flags affecting WHIP connection behavior", OFFSET(flags), AV_OPT_TYPE_FLAGS,  { .i64 = 0 }, 0, 0, ENC, .unit = "flags" },
+    { "ignore_ipv6", "Ignore any IPv6 ICE candidate", 0, AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 }, 0, UINT_MAX, ENC, .unit = "flags" },
+    { "disable_rtx", "Disable RFC 4588 RTX", 0, AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_DISABLE_RTX }, 0, UINT_MAX, ENC, .unit = "flags" },
+    { "rtx_history_size", "Packet history size", OFFSET(history_size), AV_OPT_TYPE_INT, { .i64 = HISTORY_SIZE_DEFAULT }, 64, 2048, ENC },
     { NULL },
 };
 
