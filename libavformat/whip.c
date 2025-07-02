@@ -151,7 +151,7 @@
 #define WHIP_SDP_SESSION_ID "4489045141692799359"
 #define WHIP_SDP_CREATOR_IP "127.0.0.1"
 
-/** 
+/**
  * Retransmission / NACK support
 */
 #define HISTORY_SIZE_DEFAULT 512
@@ -206,9 +206,9 @@ typedef enum WHIPFlags {
 
 typedef struct RtpHistoryItem {
         /* original RTP seq */
-        uint16_t seq;            
+        uint16_t seq;
         /* length in bytes */
-        int size;           
+        int size;
         /* malloc-ed copy */
         uint8_t* pkt;
 } RtpHistoryItem;
@@ -631,7 +631,7 @@ static int generate_sdp_offer(AVFormatContext *s)
     whip->audio_payload_type = WHIP_RTP_PAYLOAD_TYPE_OPUS;
     whip->video_payload_type = WHIP_RTP_PAYLOAD_TYPE_H264;
 
-    /* RTX / NACK init */
+    /* RTX and NACK init */
     whip->rtx_payload_type = WHIP_RTP_PAYLOAD_TYPE_RTX;
     whip->video_rtx_ssrc = av_lfg_get(&whip->rnd);
     whip->rtx_seq = 0;
@@ -1490,7 +1490,7 @@ end:
     int pos = whip->hist_head % whip->history_size;
     RtpHistoryItem *it = &whip->history[pos];
     /* free older entry */
-    av_free(it->pkt);   
+    av_free(it->pkt);
     it->pkt = av_malloc(size);
     if (!it->pkt)
         return;
@@ -1560,7 +1560,7 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
 
     return ret;
 }
-/** 
+/**
  * See https://datatracker.ietf.org/doc/html/rfc4588
  * Build and send a single RTX packet
  */
@@ -1922,8 +1922,8 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
             }
         }
         /**
-         * Handle RTCP NACK 
-         * Refer to RFC 4585, Section 6.2.1 
+         * Handle RTCP NACK
+         * Refer to RFC 4585, Section 6.2.1
          * The Generic NACK message is identified by PT=RTPFB and FMT=1.
          * TODO: disable retransmisstion when "-tune zerolatency"
          */
@@ -1949,7 +1949,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                         av_log(whip, AV_LOG_ERROR, "WHIP: SRTCP decrypt failed: %d\n", ret);
                     while (12 + i < rtcp_len && ret == 0) {
                         /**
-                         *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1 
+                         *  See https://datatracker.ietf.org/doc/html/rfc4585#section-6.1
                          *  Handle multi NACKs in bundled packet.
                          */
                         uint16_t pid = AV_RB16(&pkt[ptr + 12 + i]);
@@ -1963,8 +1963,8 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
 
                             const RtpHistoryItem *it = rtp_history_find(whip, seq);
                             if (it) {
-                                av_log(whip, AV_LOG_VERBOSE, 
-                                    "WHIP: NACK, packet found: size: %d, seq=%d, rtx size=%d, lateset stored packet seq:%d\n", 
+                                av_log(whip, AV_LOG_VERBOSE,
+                                    "WHIP: NACK, packet found: size: %d, seq=%d, rtx size=%d, lateset stored packet seq:%d\n",
                                     it->size, seq, ret, whip->history[whip->hist_head-1].seq);
                                 ret = send_rtx_packet(s, it->pkt, it->size);
                                 if (ret <= 0 && !(whip->flags & WHIP_FLAG_DISABLE_RTX))
