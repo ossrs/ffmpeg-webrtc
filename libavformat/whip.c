@@ -210,7 +210,7 @@ typedef struct RtpHistoryItem {
         /* length in bytes */
         int size;
         /* malloc-ed copy */
-        uint8_t* pkt;
+        uint8_t* buf;
 } RtpHistoryItem;
 
 typedef struct WHIPContext {
@@ -1487,19 +1487,19 @@ end:
 /**
  * RTX history helpers
  */
- static void rtp_history_store(WHIPContext *whip, const uint8_t *pkt, int size)
+ static void rtp_history_store(WHIPContext *whip, const uint8_t *buf, int size)
 {
     int pos = whip->hist_head % whip->history_size;
     RtpHistoryItem *it = &whip->history[pos];
     /* free older entry */
-    av_free(it->pkt);
-    it->pkt = av_malloc(size);
-    if (!it->pkt)
+    av_free(it->buf);
+    it->buf = av_malloc(size);
+    if (!it->buf)
         return;
 
-    memcpy(it->pkt, pkt, size);
+    memcpy(it->buf, buf, size);
     it->size = size;
-    it->seq = AV_RB16(pkt + 2);
+    it->seq = AV_RB16(buf + 2);
 
     whip->hist_head = ++pos;
 }
@@ -1508,7 +1508,7 @@ static const RtpHistoryItem *rtp_history_find(const WHIPContext *whip, uint16_t 
 {
     for (int i = 0; i < whip->history_size; i++) {
         const RtpHistoryItem *it = &whip->history[i];
-        if (it->pkt && it->seq == seq)
+        if (it->buf && it->seq == seq)
             return it;
     }
     return NULL;
@@ -1566,7 +1566,7 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
  * See https://datatracker.ietf.org/doc/html/rfc4588
  * Build and send a single RTX packet
  */
-static int send_rtx_packet(AVFormatContext *s, const uint8_t *orig_pkt, int orig_size)
+static int send_rtx_packet(AVFormatContext *s, const uint8_t *orig_pkt_buf, int orig_size)
 {
     WHIPContext *whip = s->priv_data;
     int new_size, cipher_size;
@@ -1577,7 +1577,7 @@ static int send_rtx_packet(AVFormatContext *s, const uint8_t *orig_pkt, int orig
     if (orig_size + 2 > sizeof(whip->buf))
         return 0;
 
-    memcpy(whip->buf, orig_pkt, orig_size);
+    memcpy(whip->buf, orig_pkt_buf, orig_size);
 
     uint8_t *hdr = whip->buf;
     uint16_t orig_seq = AV_RB16(hdr + 2);
@@ -1968,7 +1968,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
                                 av_log(whip, AV_LOG_VERBOSE,
                                     "WHIP: NACK, packet found: size: %d, seq=%d, rtx size=%d, lateset stored packet seq:%d\n",
                                     it->size, seq, ret, whip->history[whip->hist_head-1].seq);
-                                ret = send_rtx_packet(s, it->pkt, it->size);
+                                ret = send_rtx_packet(s, it->buf, it->size);
                                 if (ret <= 0 && !(whip->flags & WHIP_FLAG_DISABLE_RTX))
                                     av_log(whip, AV_LOG_ERROR, "WHIP: Failed to send RTX packet\n");
                             } else {
@@ -2089,6 +2089,7 @@ static const AVOption options[] = {
     { "whip_flags", "Set flags affecting WHIP connection behavior", OFFSET(flags), AV_OPT_TYPE_FLAGS,  { .i64 = 0 }, 0, 0, ENC, .unit = "flags" },
     { "ignore_ipv6", "Ignore any IPv6 ICE candidate", 0, AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_IGNORE_IPV6 }, 0, UINT_MAX, ENC, .unit = "flags" },
     { "disable_rtx", "Disable RFC 4588 RTX", 0, AV_OPT_TYPE_CONST,  { .i64 = WHIP_FLAG_DISABLE_RTX }, 0, UINT_MAX, ENC, .unit = "flags" },
+    { "rtx_history_size", "Packet history size", OFFSET(history_size), AV_OPT_TYPE_INT, { .i64 = HISTORY_SIZE_DEFAULT }, 64, 2048, ENC },
     { NULL },
 };
 
