@@ -201,6 +201,7 @@ typedef struct WHIPContext {
     /* The callback return value for DTLS. */
     int dtls_ret;
     int dtls_closed;
+    int is_active;
 
     /* Parameters for the input audio and video codecs. */
     AVCodecParameters *audio_par;
@@ -641,7 +642,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             "a=ice-ufrag:%s\r\n"
             "a=ice-pwd:%s\r\n"
             "a=fingerprint:sha-256 %s\r\n"
-            "a=setup:passive\r\n"
+            "a=setup:%s\r\n"
             "a=mid:0\r\n"
             "a=sendonly\r\n"
             "a=msid:FFmpeg audio\r\n"
@@ -653,6 +654,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             whip->ice_ufrag_local,
             whip->ice_pwd_local,
             whip->dtls_fingerprint,
+            whip->is_active ? "active" : "passive",
             whip->audio_payload_type,
             acodec_name,
             whip->audio_par->sample_rate,
@@ -676,7 +678,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             "a=ice-ufrag:%s\r\n"
             "a=ice-pwd:%s\r\n"
             "a=fingerprint:sha-256 %s\r\n"
-            "a=setup:passive\r\n"
+            "a=setup:%s\r\n"
             "a=mid:1\r\n"
             "a=sendonly\r\n"
             "a=msid:FFmpeg video\r\n"
@@ -690,6 +692,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             whip->ice_ufrag_local,
             whip->ice_pwd_local,
             whip->dtls_fingerprint,
+            whip->is_active ? "active" : "passive",
             whip->video_payload_type,
             vcodec_name,
             whip->video_payload_type,
@@ -1266,7 +1269,7 @@ next_packet:
         }
 
         /* Read the STUN or DTLS messages from peer. */
-        for (i = 0; i < ICE_DTLS_READ_INTERVAL / 5 && whip->state < WHIP_STATE_DTLS_CONNECTING; i++) {
+        for (i = 0; i < ICE_DTLS_READ_INTERVAL / 5 && (whip->is_active ? whip->state < WHIP_STATE_ICE_CONNECTED : whip->state < WHIP_STATE_DTLS_CONNECTING); i++) {
             ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
             if (ret > 0)
                 break;
@@ -1279,7 +1282,7 @@ next_packet:
         }
 
         /* Got nothing, continue to process handshake. */
-        if (ret <= 0 && whip->state < WHIP_STATE_DTLS_CONNECTING)
+        if (ret <= 0 && (whip->is_active ? whip->state < WHIP_STATE_ICE_CONNECTED : whip->state < WHIP_STATE_DTLS_CONNECTING))
             continue;
 
         /* Handle the ICE binding response. */
@@ -1303,7 +1306,7 @@ next_packet:
                 } else
                     av_dict_set(&opts, "key_pem", whip->key_buf, 0);
                 av_dict_set_int(&opts, "external_sock", 1, 0);
-                av_dict_set_int(&opts, "listen", 1, 0);
+                av_dict_set_int(&opts, "listen", whip->is_active ? 0 : 1, 0);
                 /* If got the first binding response, start DTLS handshake. */
                 ret = ffurl_open_whitelist(&whip->dtls_uc, buf, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
                     &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
@@ -1323,7 +1326,7 @@ next_packet:
         }
 
         /* If got any DTLS messages, handle it. */
-        if (is_dtls_packet(whip->buf, ret) && whip->state >= WHIP_STATE_ICE_CONNECTED || whip->state == WHIP_STATE_DTLS_CONNECTING) {
+        if ((is_dtls_packet(whip->buf, ret) || whip->is_active) && whip->state >= WHIP_STATE_ICE_CONNECTED || whip->state == WHIP_STATE_DTLS_CONNECTING) {
             whip->state = WHIP_STATE_DTLS_CONNECTING;
             if ((ret = ffurl_handshake(whip->dtls_uc)) < 0)
                 goto end;
@@ -1901,6 +1904,7 @@ static const AVOption options[] = {
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
+    { "is_active",          "Optional dtls role for WHIP, 1 for active, 0 for passive", OFFSET(is_active),          AV_OPT_TYPE_INT,    { .i64 = 0 },     0,       1, ENC },
     { NULL },
 };
 
