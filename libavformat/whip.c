@@ -1378,13 +1378,11 @@ static int setup_srtp(AVFormatContext *s)
     char *client_salt = server_key + DTLS_SRTP_KEY_LEN;
     char *server_salt = client_salt + DTLS_SRTP_SALT_LEN;
 
-    /* As DTLS server, the recv key is client master key plus salt. */
-    memcpy(recv_key, client_key, DTLS_SRTP_KEY_LEN);
-    memcpy(recv_key + DTLS_SRTP_KEY_LEN, client_salt, DTLS_SRTP_SALT_LEN);
+    memcpy(whip->is_active ? send_key : recv_key, client_key, DTLS_SRTP_KEY_LEN);
+    memcpy(whip->is_active ? send_key + DTLS_SRTP_KEY_LEN : recv_key + DTLS_SRTP_KEY_LEN, client_salt, DTLS_SRTP_SALT_LEN);
 
-    /* As DTLS server, the send key is server master key plus salt. */
-    memcpy(send_key, server_key, DTLS_SRTP_KEY_LEN);
-    memcpy(send_key + DTLS_SRTP_KEY_LEN, server_salt, DTLS_SRTP_SALT_LEN);
+    memcpy(whip->is_active ? recv_key : send_key, server_key, DTLS_SRTP_KEY_LEN);
+    memcpy(whip->is_active ? recv_key + DTLS_SRTP_KEY_LEN : send_key + DTLS_SRTP_KEY_LEN, server_salt, DTLS_SRTP_SALT_LEN);
 
     /* Setup SRTP context for outgoing packets */
     if (!av_base64_encode(buf, sizeof(buf), send_key, sizeof(send_key))) {
