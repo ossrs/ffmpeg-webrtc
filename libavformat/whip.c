@@ -156,9 +156,11 @@
 /* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
 enum STUNAttr {
     STUN_ATTR_USERNAME                  = 0x0006, /// shared secret response/bind request
+    STUN_ATTR_PRIORITY                  = 0x0024, /// ICE controlling/controlled
     STUN_ATTR_USE_CANDIDATE             = 0x0025, /// bind request
     STUN_ATTR_MESSAGE_INTEGRITY         = 0x0008, /// bind request/response
     STUN_ATTR_FINGERPRINT               = 0x8028, /// rfc5389
+    STUN_ATTR_ICE_CONTROLLING           = 0x802A, /// full agent talking to ice-lite
 };
 
 enum WHIPState {
@@ -303,6 +305,11 @@ typedef struct WHIPContext {
     /* The certificate and private key used for DTLS handshake. */
     char* cert_file;
     char* key_file;
+
+    
+    /* ICE-lite support */
+    int ice_lite_remote;
+    uint64_t  ice_tie_breaker;   /* random 64-bit, for ICE-CONTROLLING    */
 } WHIPContext;
 
 /**
@@ -416,6 +423,9 @@ static av_cold int initialize(AVFormatContext *s)
     /* Initialize the random number generator. */
     seed = av_get_random_seed();
     av_lfg_init(&whip->rnd, seed);
+
+    /* 64-bit tie-breaker for ICE-CONTROLLING (RFC 8445 6.1.1) */
+    whip->ice_tie_breaker = ((uint64_t)av_lfg_get(&whip->rnd) << 32) | (uint64_t)av_lfg_get(&whip->rnd);
 
     if (whip->pkt_size < ideal_pkt_size)
         av_log(whip, AV_LOG_WARNING, "pkt_size=%d(<%d) is too small, may cause packet loss\n",
@@ -907,6 +917,8 @@ static int parse_answer(AVFormatContext *s)
                     goto end;
                 }
             }
+        } else if (av_strstart(line, "a=ice-lite", NULL)) {
+            whip->ice_lite_remote = 1;
         }
     }
 
@@ -997,6 +1009,22 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     /* Write the use-candidate attribute */
     avio_wb16(pb, STUN_ATTR_USE_CANDIDATE); /* attribute type use-candidate */
     avio_wb16(pb, 0); /* size of use-candidate */
+
+    /**
+     * For ICE-lite peers we are *always* the controlling agent (RFC 8445 6.1.3.1).
+     * Add PRIORITY + ICE-CONTROLLING attributes.
+     */
+     if (whip->ice_lite_remote) {
+        /* we are controlling, use host-candidate priority 126 << 24 | 65535 << 8 | 255 = 2130706431 */
+        avio_wb16(pb, STUN_ATTR_PRIORITY);
+        avio_wb16(pb, 4);
+        avio_wb32(pb, 2130706431);
+            
+        avio_wb16(pb, STUN_ATTR_ICE_CONTROLLING);
+        avio_wb16(pb, 8);
+        avio_wb32(pb, (uint32_t)(whip->ice_tie_breaker >> 32));
+        avio_wb32(pb, (uint32_t)(whip->ice_tie_breaker & 0xffffffff));
+    }
 
     /* Build and update message integrity */
     avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
