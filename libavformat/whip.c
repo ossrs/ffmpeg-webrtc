@@ -195,8 +195,6 @@ enum WHIPState {
     WHIP_STATE_ICE_CONNECTING,
     /* The muxer has received the ICE response from the peer. */
     WHIP_STATE_ICE_CONNECTED,
-    /* The muxer starts attempting the DTLS handshake. */
-    WHIP_STATE_DTLS_CONNECTING,
     /* The muxer has finished the DTLS handshake with the peer. */
     WHIP_STATE_DTLS_FINISHED,
     /* The muxer has finished the SRTP setup. */
@@ -1327,7 +1325,7 @@ next_packet:
         }
 
         /* Read the STUN or DTLS messages from peer. */
-        for (i = 0; i < ICE_DTLS_READ_INTERVAL / 5 && whip->state < WHIP_STATE_DTLS_CONNECTING; i++) {
+        for (i = 0; i < ICE_DTLS_READ_INTERVAL / 5 && whip->state < WHIP_STATE_ICE_CONNECTED; i++) {
             ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
             if (ret > 0)
                 break;
@@ -1341,14 +1339,11 @@ next_packet:
             goto end;
         }
 
-        /* Got nothing, continue to process handshake. */
-        if (ret <= 0 && (is_dtls_active ? whip->state < WHIP_STATE_ICE_CONNECTED : whip->state < WHIP_STATE_DTLS_CONNECTING))
-            continue;
-
         /* Handle the ICE binding response. */
         if (ice_is_binding_response(whip->buf, ret)) {
             if (whip->state < WHIP_STATE_ICE_CONNECTED) {
-                whip->state = WHIP_STATE_ICE_CONNECTED;
+                if (whip->is_peer_ice_lite)
+                    whip->state = WHIP_STATE_ICE_CONNECTED;
                 whip->whip_ice_time = av_gettime();
                 av_log(whip, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%dms\n",
                     whip->state, whip->ice_host, whip->ice_port, whip->whip_resource_url ? whip->whip_resource_url : "",
@@ -1378,16 +1373,15 @@ next_packet:
             goto next_packet;
         }
 
-        /* When a binding request is received, it is necessary to respond immediately. */
+        /* See RFC8445, Triggered check when the peer is ice full mode */
         if (ice_is_binding_request(whip->buf, ret)) {
             if ((ret = ice_handle_binding_request(s, whip->buf, ret)) < 0)
                 goto end;
             goto next_packet;
         }
 
-        /* If got any DTLS messages, handle it. */
-        if ((is_dtls_packet(whip->buf, ret) || is_dtls_active) && whip->state >= WHIP_STATE_ICE_CONNECTED || whip->state == WHIP_STATE_DTLS_CONNECTING) {
-            whip->state = WHIP_STATE_DTLS_CONNECTING;
+        if ((is_dtls_packet(whip->buf, ret) || is_dtls_active) && whip->state >= WHIP_STATE_ICE_CONNECTED || whip->state == WHIP_STATE_ICE_CONNECTING) {
+            whip->state = WHIP_STATE_ICE_CONNECTED;
             ret = ffurl_handshake(whip->dtls_uc);
             if (ret < 0) {
                 whip->state = WHIP_STATE_FAILED;
