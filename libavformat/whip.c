@@ -389,19 +389,6 @@ static av_cold int certificate_key_init(AVFormatContext *s)
     return ret;
 }
 
-static av_cold int dtls_initialize(AVFormatContext *s)
-{
-    WHIPContext *whip = s->priv_data;
-    /* reuse the udp created by whip */
-    ff_tls_set_external_socket(whip->dtls_uc, whip->udp);
-
-    /* Make the socket non-blocking */
-    ff_socket_nonblock(ffurl_get_file_handle(whip->dtls_uc), 1);
-    whip->dtls_uc->flags |= AVIO_FLAG_NONBLOCK;
-
-    return 0;
-}
-
 /**
  * Initialize and check the options for the WebRTC muxer.
  */
@@ -1286,14 +1273,12 @@ end:
     return ret;
 }
 
-static int ice_dtls_handshake(AVFormatContext *s)
+static int handle_ice_handshake(AVFormatContext *s)
 {
     int ret = 0, size, i;
     int64_t starttime = av_gettime(), now;
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_FLAG_DTLS_ACTIVE;
-    AVDictionary *opts = NULL;
-    char buf[256], *cert_buf = NULL, *key_buf = NULL;
 
     if (whip->state < WHIP_STATE_UDP_CONNECTED || !whip->udp) {
         av_log(whip, AV_LOG_ERROR, "UDP not connected, state=%d, udp=%p\n", whip->state, whip->udp);
@@ -1315,25 +1300,20 @@ static int ice_dtls_handshake(AVFormatContext *s)
                 goto end;
             }
 
-            if (whip->state < WHIP_STATE_ICE_CONNECTING)
-                whip->state = WHIP_STATE_ICE_CONNECTING;
+            whip->state = WHIP_STATE_ICE_CONNECTING;
         }
 
 next_packet:
-        if (whip->state >= WHIP_STATE_DTLS_FINISHED)
-            /* DTLS handshake is done, exit the loop. */
-            break;
-
         now = av_gettime();
         if (now - starttime >= whip->handshake_timeout * 1000) {
-            av_log(whip, AV_LOG_ERROR, "DTLS handshake timeout=%dms, cost=%dms, elapsed=%dms, state=%d\n",
+            av_log(whip, AV_LOG_ERROR, "ICE handshake timeout=%dms, cost=%dms, elapsed=%dms, state=%d\n",
                 whip->handshake_timeout, ELAPSED(starttime, now), ELAPSED(whip->whip_starttime, now), whip->state);
             ret = AVERROR(ETIMEDOUT);
             goto end;
         }
 
-        /* Read the STUN or DTLS messages from peer. */
-        for (i = 0; i < ICE_DTLS_READ_INTERVAL / 5 && whip->state < WHIP_STATE_ICE_CONNECTED; i++) {
+        /* Read the STUN or DTLS client hello from peer. */
+        for (i = 0; i < ICE_DTLS_READ_INTERVAL / 5; i++) {
             ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
             if (ret > 0)
                 break;
@@ -1349,34 +1329,9 @@ next_packet:
 
         /* Handle the ICE binding response. */
         if (ice_is_binding_response(whip->buf, ret)) {
-            if (whip->state < WHIP_STATE_ICE_CONNECTED) {
-                if (whip->is_peer_ice_lite)
-                    whip->state = WHIP_STATE_ICE_CONNECTED;
+            if (whip->is_peer_ice_lite) {
+                whip->state = WHIP_STATE_ICE_CONNECTED;
                 whip->whip_ice_time = av_gettime();
-                av_log(whip, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%dms\n",
-                    whip->state, whip->ice_host, whip->ice_port, whip->whip_resource_url ? whip->whip_resource_url : "",
-                    whip->ice_ufrag_remote, whip->ice_ufrag_local, ret, ELAPSED(whip->whip_starttime, av_gettime()));
-
-                ff_url_join(buf, sizeof(buf), "dtls", NULL, whip->ice_host, whip->ice_port, NULL);
-                av_dict_set_int(&opts, "mtu", whip->pkt_size, 0);
-                if (whip->cert_file) {
-                    av_dict_set(&opts, "cert_file", whip->cert_file, 0);
-                } else
-                    av_dict_set(&opts, "cert_pem", whip->cert_buf, 0);
-
-                if (whip->key_file) {
-                    av_dict_set(&opts, "key_file", whip->key_file, 0);
-                } else
-                    av_dict_set(&opts, "key_pem", whip->key_buf, 0);
-                av_dict_set_int(&opts, "external_sock", 1, 0);
-                av_dict_set_int(&opts, "listen", is_dtls_active ? 0 : 1, 0);
-                /* If got the first binding response, start DTLS handshake. */
-                ret = ffurl_open_whitelist(&whip->dtls_uc, buf, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
-                    &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
-                av_dict_free(&opts);
-                if (ret < 0)
-                    goto end;
-                dtls_initialize(s);
             }
             goto next_packet;
         }
@@ -1388,29 +1343,64 @@ next_packet:
             goto next_packet;
         }
 
-        if ((is_dtls_packet(whip->buf, ret) || is_dtls_active) && whip->state >= WHIP_STATE_ICE_CONNECTED || whip->state == WHIP_STATE_ICE_CONNECTING) {
-            whip->state = WHIP_STATE_ICE_CONNECTED;
-            ret = ffurl_handshake(whip->dtls_uc);
-            if (ret < 0) {
-                whip->state = WHIP_STATE_FAILED;
-                av_log(whip, AV_LOG_VERBOSE, "DTLS session failed\n");
-                goto end;
+        if (is_dtls_packet(whip->buf, ret) || whip->flags & WHIP_FLAG_DTLS_ACTIVE) {
+            if (whip->state < WHIP_STATE_ICE_CONNECTED) {
+                whip->state = WHIP_STATE_ICE_CONNECTED;
+                whip->whip_ice_time = av_gettime();
             }
-            if (!ret) {
-                whip->state = WHIP_STATE_DTLS_FINISHED;
-                whip->whip_dtls_time = av_gettime();
-                av_log(whip, AV_LOG_VERBOSE, "DTLS handshake is done, elapsed=%dms\n",
-                    ELAPSED(whip->whip_starttime, whip->whip_dtls_time));
-            }
-            goto next_packet;
+            ret = 0;
+            av_log(whip, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%dms\n",
+                whip->state, whip->ice_host, whip->ice_port, whip->whip_resource_url ? whip->whip_resource_url : "",
+                whip->ice_ufrag_remote, whip->ice_ufrag_local, ret, ELAPSED(whip->whip_starttime, whip->whip_ice_time));
+            break;
         }
     }
-
 end:
-    if (cert_buf)
-        av_free(cert_buf);
-    if (key_buf)
-        av_free(key_buf);
+    return ret;
+}
+
+static int handle_dtls_handshake(AVFormatContext *s)
+{
+    int ret = 0;
+    WHIPContext *whip = s->priv_data;
+    AVDictionary *opts = NULL;
+    char buf[256];
+
+    ff_url_join(buf, sizeof(buf), "dtls", NULL, whip->ice_host, whip->ice_port, NULL);
+    av_dict_set_int(&opts, "mtu", whip->pkt_size, 0);
+    if (whip->cert_file) {
+        av_dict_set(&opts, "cert_file", whip->cert_file, 0);
+    } else
+        av_dict_set(&opts, "cert_pem", whip->cert_buf, 0);
+
+    if (whip->key_file) {
+        av_dict_set(&opts, "key_file", whip->key_file, 0);
+    } else
+        av_dict_set(&opts, "key_pem", whip->key_buf, 0);
+    av_dict_set_int(&opts, "external_sock", 1, 0);
+    av_dict_set_int(&opts, "listen", whip->flags & WHIP_FLAG_DTLS_ACTIVE ? 0 : 1, 0);
+
+    ret = ffurl_open_whitelist(&whip->dtls_uc, buf, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
+        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
+    av_dict_free(&opts);
+    if (ret < 0)
+        goto end;
+
+    /* reuse the udp created by whip */
+    ff_tls_set_external_socket(whip->dtls_uc, whip->udp);
+
+    ret = ffurl_handshake(whip->dtls_uc);
+    if (ret < 0) {
+        whip->state = WHIP_STATE_FAILED;
+        av_log(whip, AV_LOG_VERBOSE, "DTLS session failed\n");
+    }
+    if (!ret) {
+        whip->state = WHIP_STATE_DTLS_FINISHED;
+        whip->whip_dtls_time = av_gettime();
+        av_log(whip, AV_LOG_VERBOSE, "DTLS handshake is done, elapsed=%dms\n",
+            ELAPSED(whip->whip_starttime, whip->whip_dtls_time));
+    }
+end:
     return ret;
 }
 
@@ -1935,7 +1925,10 @@ static av_cold int whip_init(AVFormatContext *s)
     if ((ret = udp_connect(s)) < 0)
         goto end;
 
-    if ((ret = ice_dtls_handshake(s)) < 0)
+    if ((ret = handle_ice_handshake(s)) < 0)
+        goto end;
+
+    if ((ret = handle_dtls_handshake(s)) < 0)
         goto end;
 
     if ((ret = setup_srtp(s)) < 0)
