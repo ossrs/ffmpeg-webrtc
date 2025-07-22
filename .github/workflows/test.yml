@@ -386,7 +386,10 @@ jobs:
 
           # Build FFmpeg with WebRTC support
           PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
-            ./configure --enable-muxer=whip --enable-openssl --enable-version3
+            ./configure --enable-muxer=whip --enable-openssl \
+            --extra-cflags="-I$HOME/.release/openssl/include" \
+            --extra-ldflags="-L$HOME/.release/openssl/lib" \
+            --pkg-config-flags="--static"
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -467,7 +470,10 @@ jobs:
 
           # Build FFmpeg with WebRTC support
           PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
-            ./configure --enable-muxer=whip --enable-openssl --enable-version3
+            ./configure --enable-muxer=whip --enable-openssl \
+            --extra-cflags="-I$HOME/.release/openssl/include" \
+            --extra-ldflags="-L$HOME/.release/openssl/lib" \
+            --pkg-config-flags="--static"
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -548,7 +554,10 @@ jobs:
 
           # Build FFmpeg with WebRTC support
           PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
-            ./configure --enable-muxer=whip --enable-openssl --enable-version3
+            ./configure --enable-muxer=whip --enable-openssl \
+            --extra-cflags="-I$HOME/.release/openssl/include" \
+            --extra-ldflags="-L$HOME/.release/openssl/lib" \
+            --pkg-config-flags="--static"
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
       - name: Start SRS Docker container
@@ -626,6 +635,9 @@ jobs:
           # Build FFmpeg with WebRTC support
           PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
             ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --extra-cflags="-I$HOME/.release/openssl/include" \
+            --extra-ldflags="-L$HOME/.release/openssl/lib" \
+            --pkg-config-flags="--static" \
             --enable-libx264 --enable-gpl --enable-libopus
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
@@ -705,6 +717,9 @@ jobs:
           # Build FFmpeg with WebRTC support
           PKG_CONFIG_PATH="$HOME/.release/openssl/lib/pkgconfig" \
             ./configure --enable-muxer=whip --enable-openssl --enable-version3 \
+            --extra-cflags="-I$HOME/.release/openssl/include" \
+            --extra-ldflags="-L$HOME/.release/openssl/lib" \
+            --pkg-config-flags="--static" \
             --enable-libx264 --enable-gpl --enable-libopus
           make -j$(nproc)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
