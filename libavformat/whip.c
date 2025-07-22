@@ -1366,6 +1366,7 @@ static int dtls_handshake(AVFormatContext *s)
     } else
         av_dict_set(&opts, "key_pem", whip->key_buf, 0);
     av_dict_set_int(&opts, "external_sock", 1, 0);
+    av_dict_set_int(&opts, "use_srtp", 1, 0);
     av_dict_set_int(&opts, "listen", whip->flags & WHIP_FLAG_DTLS_ACTIVE ? 0 : 1, 0);
     /* If got the first binding response, start DTLS handshake. */
     ret = ffurl_open_whitelist(&whip->dtls_uc, buf, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
