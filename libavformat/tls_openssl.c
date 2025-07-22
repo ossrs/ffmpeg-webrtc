@@ -1007,13 +1007,17 @@ static int tls_write(URLContext *h, const uint8_t *buf, int size)
     URLContext *uc = c->tls_shared.is_dtls ? c->tls_shared.udp
                                            : c->tls_shared.tcp;
     int ret;
-
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L  // OpenSSL 1.1.1
+    int data_mtu = DTLS_get_data_mtu(c->ssl);
+#else
+    int data_mtu = s->mtu - 64; // Conservative overhead covers all cases
+#endif
     // Set or clear the AVIO_FLAG_NONBLOCK on c->tls_shared.tcp
     uc->flags &= ~AVIO_FLAG_NONBLOCK;
     uc->flags |= h->flags & AVIO_FLAG_NONBLOCK;
 
     if (c->tls_shared.is_dtls)
-        size = FFMIN(size, DTLS_get_data_mtu(c->ssl));
+        size = FFMIN(size, data_mtu);
 
     ret = SSL_write(c->ssl, buf, size);
     if (ret > 0)
