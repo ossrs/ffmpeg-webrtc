@@ -131,6 +131,13 @@
 #define WHIP_RTP_HEADER_SIZE 12
 
 /**
+ * Each RTCP packet begins with a fixed part similar to that of RTP data packets,
+ * followed by structured elements that MUST end on a 32‑bit boundary.
+ * See https://www.rfc-editor.org/rfc/rfc3550#section-6.1
+ */
+#define WHIP_RTCP_HEADER_SIZE 4
+
+/**
  * For RTCP, PT is [128, 223] (or without marker [0, 95]). Literally, RTCP starts
  * from 64 not 0, so PT is [192, 223] (or without marker [64, 95]), see "RTCP Control
  * Packet Types (PT)" at
@@ -1125,6 +1132,11 @@ static int ice_is_binding_response(uint8_t *b, int size)
  * see https://www.rfc-editor.org/rfc/rfc3550#section-5.1
  * The RTCP packet header is similar to RTP,
  * see https://www.rfc-editor.org/rfc/rfc3550#section-6.4.1
+ * 
+ * The smallest RTCP packet empty RR packet is 8 bytes,
+ * see https://www.rfc-editor.org/rfc/rfc3550#section-6.4.2
+ * Just ignore that case because we can't parse any useful info from empty RR.
+ * So set the size >= WHIP_RTP_HEADER_SIZE(12 bytes) covers all rtp and rtcp case.
  */
 static int media_is_rtp_rtcp(const uint8_t *b, int size)
 {
@@ -1134,7 +1146,7 @@ static int media_is_rtp_rtcp(const uint8_t *b, int size)
 /* Whether the packet is RTCP. */
 static int media_is_rtcp(const uint8_t *b, int size)
 {
-    return size >= WHIP_RTP_HEADER_SIZE && b[1] >= WHIP_RTCP_PT_START && b[1] <= WHIP_RTCP_PT_END;
+    return size >= WHIP_RTCP_HEADER_SIZE && b[1] >= WHIP_RTCP_PT_START && b[1] <= WHIP_RTCP_PT_END;
 }
 
 /**
