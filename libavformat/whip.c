@@ -398,7 +398,7 @@ static av_cold int initialize(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     uint32_t seed;
 
-    whip->whip_starttime = av_gettime();
+    whip->whip_starttime = av_gettime_relative();
 
     ret = certificate_key_init(s);
     if (ret < 0) {
@@ -420,9 +420,9 @@ static av_cold int initialize(AVFormatContext *s)
 
     if (whip->state < WHIP_STATE_INIT)
         whip->state = WHIP_STATE_INIT;
-    whip->whip_init_time = av_gettime();
+    whip->whip_init_time = av_gettime_relative();
     av_log(whip, AV_LOG_VERBOSE, "Init state=%d, handshake_timeout=%dms, pkt_size=%d, seed=%d, elapsed=%dms\n",
-        whip->state, whip->handshake_timeout, whip->pkt_size, seed, ELAPSED(whip->whip_starttime, av_gettime()));
+        whip->state, whip->handshake_timeout, whip->pkt_size, seed, ELAPSED(whip->whip_starttime, av_gettime_relative()));
 
     return 0;
 }
@@ -752,7 +752,7 @@ static int generate_sdp_offer(AVFormatContext *s)
 
     if (whip->state < WHIP_STATE_OFFER)
         whip->state = WHIP_STATE_OFFER;
-    whip->whip_offer_time = av_gettime();
+    whip->whip_offer_time = av_gettime_relative();
     av_log(whip, AV_LOG_VERBOSE, "Generated state=%d, offer: %s\n", whip->state, whip->sdp_offer);
 
 end:
@@ -978,10 +978,10 @@ static int parse_answer(AVFormatContext *s)
 
     if (whip->state < WHIP_STATE_NEGOTIATED)
         whip->state = WHIP_STATE_NEGOTIATED;
-    whip->whip_answer_time = av_gettime();
+    whip->whip_answer_time = av_gettime_relative();
     av_log(whip, AV_LOG_VERBOSE, "SDP state=%d, offer=%zuB, answer=%zuB, ufrag=%s, pwd=%zuB, transport=%s://%s:%d, elapsed=%dms\n",
         whip->state, strlen(whip->sdp_offer), strlen(whip->sdp_answer), whip->ice_ufrag_remote, strlen(whip->ice_pwd_remote),
-        whip->ice_protocol, whip->ice_host, whip->ice_port, ELAPSED(whip->whip_starttime, av_gettime()));
+        whip->ice_protocol, whip->ice_host, whip->ice_port, ELAPSED(whip->whip_starttime, av_gettime_relative()));
 
 end:
     avio_context_free(&pb);
@@ -1264,9 +1264,9 @@ static int udp_connect(AVFormatContext *s)
 
     if (whip->state < WHIP_STATE_UDP_CONNECTED)
         whip->state = WHIP_STATE_UDP_CONNECTED;
-    whip->whip_udp_time = av_gettime();
+    whip->whip_udp_time = av_gettime_relative();
     av_log(whip, AV_LOG_VERBOSE, "UDP state=%d, elapsed=%dms, connected to udp://%s:%d\n",
-        whip->state, ELAPSED(whip->whip_starttime, av_gettime()), whip->ice_host, whip->ice_port);
+        whip->state, ELAPSED(whip->whip_starttime, av_gettime_relative()), whip->ice_host, whip->ice_port);
 
 end:
     av_dict_free(&opts);
@@ -1276,7 +1276,7 @@ end:
 static int handle_ice_handshake(AVFormatContext *s)
 {
     int ret = 0, size, i;
-    int64_t starttime = av_gettime(), now;
+    int64_t starttime = av_gettime_relative(), now;
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_FLAG_DTLS_ACTIVE;
 
@@ -1304,7 +1304,7 @@ static int handle_ice_handshake(AVFormatContext *s)
         }
 
 next_packet:
-        now = av_gettime();
+        now = av_gettime_relative();
         if (now - starttime >= whip->handshake_timeout * 1000) {
             av_log(whip, AV_LOG_ERROR, "ICE handshake timeout=%dms, cost=%dms, elapsed=%dms, state=%d\n",
                 whip->handshake_timeout, ELAPSED(starttime, now), ELAPSED(whip->whip_starttime, now), whip->state);
@@ -1331,7 +1331,7 @@ next_packet:
         if (ice_is_binding_response(whip->buf, ret)) {
             if (whip->is_peer_ice_lite) {
                 whip->state = WHIP_STATE_ICE_CONNECTED;
-                whip->whip_ice_time = av_gettime();
+                whip->whip_ice_time = av_gettime_relative();
             }
             goto next_packet;
         }
@@ -1346,7 +1346,7 @@ next_packet:
         if (is_dtls_packet(whip->buf, ret) || whip->flags & WHIP_FLAG_DTLS_ACTIVE) {
             if (whip->state < WHIP_STATE_ICE_CONNECTED) {
                 whip->state = WHIP_STATE_ICE_CONNECTED;
-                whip->whip_ice_time = av_gettime();
+                whip->whip_ice_time = av_gettime_relative();
             }
             ret = 0;
             av_log(whip, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%dms\n",
@@ -1397,7 +1397,7 @@ static int handle_dtls_handshake(AVFormatContext *s)
     }
     if (!ret) {
         whip->state = WHIP_STATE_DTLS_FINISHED;
-        whip->whip_dtls_time = av_gettime();
+        whip->whip_dtls_time = av_gettime_relative();
         av_log(whip, AV_LOG_VERBOSE, "DTLS handshake is done, elapsed=%dms\n",
             ELAPSED(whip->whip_starttime, whip->whip_dtls_time));
     }
@@ -1494,9 +1494,9 @@ static int setup_srtp(AVFormatContext *s)
 
     if (whip->state < WHIP_STATE_SRTP_FINISHED)
         whip->state = WHIP_STATE_SRTP_FINISHED;
-    whip->whip_srtp_time = av_gettime();
+    whip->whip_srtp_time = av_gettime_relative();
     av_log(whip, AV_LOG_VERBOSE, "SRTP setup done, state=%d, suite=%s, key=%zuB, elapsed=%dms\n",
-        whip->state, suite, sizeof(send_key), ELAPSED(whip->whip_starttime, av_gettime()));
+        whip->state, suite, sizeof(send_key), ELAPSED(whip->whip_starttime, av_gettime_relative()));
 
 end:
     return ret;
@@ -1747,7 +1747,7 @@ static int create_rtp_muxer(AVFormatContext *s)
         whip->state = WHIP_STATE_READY;
     av_log(whip, AV_LOG_INFO, "Muxer state=%d, buffer_size=%d, max_packet_size=%d, "
                            "elapsed=%dms(init:%d,offer:%d,answer:%d,udp:%d,ice:%d,dtls:%d,srtp:%d)\n",
-        whip->state, buffer_size, max_packet_size, ELAPSED(whip->whip_starttime, av_gettime()),
+        whip->state, buffer_size, max_packet_size, ELAPSED(whip->whip_starttime, av_gettime_relative()),
         ELAPSED(whip->whip_starttime,   whip->whip_init_time),
         ELAPSED(whip->whip_init_time,   whip->whip_offer_time),
         ELAPSED(whip->whip_offer_time,  whip->whip_answer_time),
