@@ -867,7 +867,7 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
 
     init_bio_method(h);
 
-    if (c->tls_shared.external_sock != 1) {
+    if (!c->tls_shared.external_sock) {
         if ((ret = ff_tls_open_underlying(&c->tls_shared, h, url, options)) < 0) {
             av_log(c, AV_LOG_ERROR, "Failed to connect %s\n", url);
             return ret;
@@ -891,7 +891,7 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
      *
      * The SSL_do_handshake can't be called if DTLS hasn't prepare for udp.
      */
-    if (c->tls_shared.external_sock != 1) {
+    if (!c->tls_shared.external_sock) {
         ret = dtls_handshake(h);
         // Fatal SSL error, for example, no available suite when peer is DTLS 1.0 while we are DTLS 1.2.
         if (ret < 0) {
