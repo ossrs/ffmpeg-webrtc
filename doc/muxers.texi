@@ -3915,16 +3915,37 @@ Default value is 5000.
 
 @item pkt_size @var{integer}
 Set the maximum size, in bytes, of RTP packets that send out.
-Default value is 1500.
+Default value is 1200.
 
 @item authorization @var{string}
-The optional Bearer token for WHIP Authorization.
+Optional Bearer token for WHIP Authorization.
 
 @item cert_file @var{string}
-The optional certificate file path for DTLS.
+Optional certificate file path for DTLS.
 
 @item key_file @var{string}
-The optional private key file path for DTLS.
+Optional private key file path for DTLS.
+
+@item whip_flags @var{flags}
+Possible values:
+
+@table @samp
+@item ignore_ipv6
+Ignore any IPv6 ICE candidates.
+
+@item disable_rtx
+Disable RFC 4588 RTX (Retransmission) support.
+This disables the retransmission mechanism for lost RTP packets.
+
+@item dtls_active
+Set DTLS role as active (client role) instead of passive (server role).
+By default, WHIP uses passive DTLS role, but some servers may require active role.
+@end table
+
+@item rtx_history_size @var{integer}
+Set the packet history size for RTX (retransmission) support.
+This determines how many recent RTP packets are kept in memory for potential
+retransmission requests. Range is 64 to 2048, default is 256.
 
 @end table
 
