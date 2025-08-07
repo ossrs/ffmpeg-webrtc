@@ -811,6 +811,8 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
 {
     TLSContext *c = h->priv_data;
     TLSShared *s = &c->tls_shared;
+    if (!s)
+        return AVERROR(EINVAL);
     int ret = 0;
     s->is_dtls = 1;
 
@@ -911,6 +913,8 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
 {
     TLSContext *c = h->priv_data;
     TLSShared *s = &c->tls_shared;
+    if (!s)
+        return AVERROR(EINVAL);
     int ret;
 
     if ((ret = ff_tls_open_underlying(s, h, uri, options)) < 0)
