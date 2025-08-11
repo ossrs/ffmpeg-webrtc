@@ -144,6 +144,12 @@
 #define WHIP_RTCP_PT_END   223
 
 /**
+ * Consent-freshness constants
+ */ 
+#define WHIP_CONSENT_DEF_INTERVAL   15000   /* ms - RFC 7675 default */
+#define WHIP_CONSENT_MAX_FAILURES   3
+
+/**
  * In the case of ICE-LITE, these fields are not used; instead, they are defined
  * as constant values.
  */
@@ -303,6 +309,11 @@ typedef struct WHIPContext {
     /* The certificate and private key used for DTLS handshake. */
     char* cert_file;
     char* key_file;
+
+    /* Consent-freshness state */
+    int consent_interval;
+    int64_t last_consent_tx;
+    int consent_failures;
 } WHIPContext;
 
 /**
@@ -416,6 +427,12 @@ static av_cold int initialize(AVFormatContext *s)
     /* Initialize the random number generator. */
     seed = av_get_random_seed();
     av_lfg_init(&whip->rnd, seed);
+
+    /* Initialise consent-freshness timers */
+    if (whip->consent_interval <= 0)
+        whip->consent_interval = WHIP_CONSENT_DEF_INTERVAL;
+    whip->last_consent_tx = av_gettime();
+    whip->consent_failures = 0;
 
     if (whip->pkt_size < ideal_pkt_size)
         av_log(whip, AV_LOG_WARNING, "pkt_size=%d(<%d) is too small, may cause packet loss\n",
@@ -1784,7 +1801,16 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
     AVStream *st = s->streams[pkt->stream_index];
     AVFormatContext *rtp_ctx = st->priv_data;
 
-    /* TODO: Send binding request every 1s as WebRTC heartbeat. */
+    /* Periodic consent-freshness STUN Binding Request   */
+    int64_t now = av_gettime();
+    if (now - whip->last_consent_tx >= (int64_t)whip->consent_interval * 1000) {
+        int req_sz;
+        if (ice_create_request(s, whip->buf, sizeof(whip->buf), &req_sz) >= 0 && ffurl_write(whip->udp, whip->buf, req_sz) == req_sz) {
+            whip->consent_failures++;
+            whip->last_consent_tx = now;
+            av_log(whip, AV_LOG_VERBOSE, "WHIP: consent-freshness request %d sent\n", whip->consent_failures);
+        }
+    }
 
     /**
      * Receive packets from the server such as ICE binding requests, DTLS messages,
@@ -1792,6 +1818,10 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
      */
     ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
     if (ret > 0) {
+        if (ice_is_binding_response(whip->buf, ret)) {
+            whip->consent_failures = 0;
+            av_log(whip, AV_LOG_VERBOSE, "WHIP: consent-freshness response received, counter reset\n");
+        }
         if (is_dtls_packet(whip->buf, ret)) {
             if ((ret = ffurl_write(whip->dtls_uc, whip->buf, ret)) < 0) {
                 av_log(whip, AV_LOG_ERROR, "Failed to handle DTLS message\n");
@@ -1901,6 +1931,7 @@ static const AVOption options[] = {
     { "authorization",      "The optional Bearer token for WHIP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
     { "key_file",           "The optional private key file path for DTLS",              OFFSET(key_file),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, ENC },
+    { "consent_interval",   "STUN consent refresh interval in ms (RFC 7675)",           OFFSET(consent_interval),   AV_OPT_TYPE_INT,    { .i64 = WHIP_CONSENT_DEF_INTERVAL }, 5000, 30000, ENC },
     { NULL },
 };
 
