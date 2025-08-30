@@ -179,6 +179,8 @@ enum WHIPState {
     WHIP_STATE_UDP_CONNECTED,
     /* The muxer has sent the ICE request to the peer. */
     WHIP_STATE_ICE_CONNECTING,
+    /* The muxer has paired the ICE candidate */
+    WHIP_STATE_ICE_CANDIDATE_PAIRED,
     /* The muxer has received the ICE response from the peer. */
     WHIP_STATE_ICE_CONNECTED,
     /* The muxer starts attempting the DTLS handshake. */
@@ -192,6 +194,11 @@ enum WHIPState {
     /* The muxer is failed. */
     WHIP_STATE_FAILED,
 };
+
+typedef struct ICECandidate {
+    char *host;
+    int port;
+} ICECandidate;
 
 typedef struct WHIPContext {
     AVClass *av_class;
@@ -234,12 +241,10 @@ typedef struct WHIPContext {
     /* The ICE username and pwd from remote server. */
     char *ice_ufrag_remote;
     char *ice_pwd_remote;
-    /**
-     * This represents the ICE candidate protocol, priority, host and port.
-     * Currently, we only support one candidate and choose the first UDP candidate.
-     * However, we plan to support multiple candidates in the future.
-     */
-    char *ice_protocol;
+    /* This represents the ICE candidate protocol, priority, host and port. */
+    ICECandidate *candidates;
+    int nb_candidates;
+    int candidates_index;
     char *ice_host;
     int ice_port;
 
@@ -835,6 +840,21 @@ static int parse_answer(AVFormatContext *s)
 
     for (i = 0; !avio_feof(pb); i++) {
         ff_get_chomp_line(pb, line, sizeof(line));
+        if (av_strstart(line, "a=candidate:", &ptr)) {
+            whip->nb_candidates++;
+        }
+    }
+    if (!whip->nb_candidates) {
+        av_log(whip, AV_LOG_ERROR, "No ice candidate parsed from %s\n", whip->sdp_answer);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    whip->candidates = av_calloc(whip->nb_candidates, sizeof(ICECandidate));
+
+    avio_seek(pb, 0, SEEK_SET);
+
+    for (i = 0; !avio_feof(pb); i++) {
+        ff_get_chomp_line(pb, line, sizeof(line));
         if (av_strstart(line, "a=ice-ufrag:", &ptr) && !whip->ice_ufrag_remote) {
             whip->ice_ufrag_remote = av_strdup(ptr);
             if (!whip->ice_ufrag_remote) {
@@ -847,7 +867,7 @@ static int parse_answer(AVFormatContext *s)
                 ret = AVERROR(ENOMEM);
                 goto end;
             }
-        } else if (av_strstart(line, "a=candidate:", &ptr) && !whip->ice_protocol) {
+        } else if (av_strstart(line, "a=candidate:", &ptr)) {
             ptr = av_stristr(ptr, "udp");
             if (ptr && av_stristr(ptr, "host")) {
                 char protocol[17], host[129];
@@ -867,13 +887,13 @@ static int parse_answer(AVFormatContext *s)
                     goto end;
                 }
 
-                whip->ice_protocol = av_strdup(protocol);
-                whip->ice_host = av_strdup(host);
-                whip->ice_port = port;
-                if (!whip->ice_protocol || !whip->ice_host) {
+                whip->candidates[whip->candidates_index].host = av_strdup(host);
+                whip->candidates[whip->candidates_index].port = port;
+                if (!whip->candidates[whip->candidates_index].host) {
                     ret = AVERROR(ENOMEM);
                     goto end;
                 }
+                whip->candidates_index++;
             }
         }
     }
@@ -890,18 +910,12 @@ static int parse_answer(AVFormatContext *s)
         goto end;
     }
 
-    if (!whip->ice_protocol || !whip->ice_host || !whip->ice_port) {
-        av_log(whip, AV_LOG_ERROR, "No ice candidate parsed from %s\n", whip->sdp_answer);
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
     if (whip->state < WHIP_STATE_NEGOTIATED)
         whip->state = WHIP_STATE_NEGOTIATED;
     whip->whip_answer_time = av_gettime();
-    av_log(whip, AV_LOG_VERBOSE, "SDP state=%d, offer=%zuB, answer=%zuB, ufrag=%s, pwd=%zuB, transport=%s://%s:%d, elapsed=%dms\n",
+    av_log(whip, AV_LOG_VERBOSE, "SDP state=%d, offer=%zuB, answer=%zuB, ufrag=%s, pwd=%zuB, candidates number=%d, elapsed=%dms\n",
         whip->state, strlen(whip->sdp_offer), strlen(whip->sdp_answer), whip->ice_ufrag_remote, strlen(whip->ice_pwd_remote),
-        whip->ice_protocol, whip->ice_host, whip->ice_port, ELAPSED(whip->whip_starttime, av_gettime()));
+        whip->nb_candidates, ELAPSED(whip->whip_starttime, av_gettime()));
 
 end:
     avio_context_free(&pb);
@@ -1159,9 +1173,9 @@ static int udp_connect(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
 
     /* Build UDP URL and create the UDP context as transport. */
-    ff_url_join(url, sizeof(url), "udp", NULL, whip->ice_host, whip->ice_port, NULL);
-
-    av_dict_set_int(&opts, "connect", 1, 0);
+    ff_url_join(url, sizeof(url), "udp", NULL, whip->candidates[0].host, whip->candidates[0].port, NULL);
+    /* Not tied to any addr because we need pair candidates */
+    av_dict_set_int(&opts, "connect", 0, 0);
     av_dict_set_int(&opts, "fifo_size", 0, 0);
     /* Set the max packet size to the buffer size. */
     av_dict_set_int(&opts, "pkt_size", whip->pkt_size, 0);
@@ -1169,7 +1183,7 @@ static int udp_connect(AVFormatContext *s)
     ret = ffurl_open_whitelist(&whip->udp, url, AVIO_FLAG_WRITE, &s->interrupt_callback,
         &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", whip->ice_host, whip->ice_port);
+        av_log(whip, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", whip->candidates[0].host, whip->candidates[0].port);
         goto end;
     }
 
@@ -1181,7 +1195,7 @@ static int udp_connect(AVFormatContext *s)
         whip->state = WHIP_STATE_UDP_CONNECTED;
     whip->whip_udp_time = av_gettime();
     av_log(whip, AV_LOG_VERBOSE, "UDP state=%d, elapsed=%dms, connected to udp://%s:%d\n",
-        whip->state, ELAPSED(whip->whip_starttime, av_gettime()), whip->ice_host, whip->ice_port);
+        whip->state, ELAPSED(whip->whip_starttime, av_gettime()), whip->candidates[0].host, whip->candidates[0].port);
 
 end:
     av_dict_free(&opts);
@@ -1195,6 +1209,8 @@ static int ice_dtls_handshake(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     AVDictionary *opts = NULL;
     char buf[256], *cert_buf = NULL, *key_buf = NULL;
+    char *url = NULL;
+    whip->candidates_index = 0;
 
     if (whip->state < WHIP_STATE_UDP_CONNECTED || !whip->udp) {
         av_log(whip, AV_LOG_ERROR, "UDP not connected, state=%d, udp=%p\n", whip->state, whip->udp);
@@ -1209,15 +1225,45 @@ static int ice_dtls_handshake(AVFormatContext *s)
                 av_log(whip, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
                 goto end;
             }
+ice_pair:
+            url = av_asprintf("udp://%s:%d", whip->candidates[whip->candidates_index].host, whip->candidates[whip->candidates_index].port);
+            ret = ff_udp_set_remote_url(whip->udp, url);
+            if (ret < 0) {
+                av_log(whip, AV_LOG_ERROR, "Failed connecting udp context, %s\n", url);
+                goto end;
+            }
 
             ret = ffurl_write(whip->udp, whip->buf, size);
             if (ret < 0) {
-                av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
-                goto end;
+                av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request to %s:%d, size=%d, try next candidate\n",
+                    whip->candidates[whip->candidates_index].host, whip->candidates[whip->candidates_index].port, size);
+
+            }
+
+            /* Read the STUN or DTLS messages from peer. */
+            for (i = 0; i < ICE_DTLS_READ_INTERVAL / 5; i++) {
+                ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
+                if (ret > 0)
+                    break;
+                if (ret == AVERROR(EAGAIN)) {
+                    av_usleep(5 * 1000);
+                    continue;
+                }
+            }
+            if (ret < 0) {
+                av_log(whip, AV_LOG_ERROR, "Failed to read message from %s:%d, ret=%d\n",
+                    whip->candidates[whip->candidates_index].host, whip->candidates[whip->candidates_index].port, ret);
+                whip->candidates_index++;
+                if (whip->candidates_index == whip->nb_candidates)
+                    goto end;
+                av_log(whip, AV_LOG_VERBOSE, "Pair failed, try next cnadidate\n");
+                goto ice_pair;
             }
 
             if (whip->state < WHIP_STATE_ICE_CONNECTING)
                 whip->state = WHIP_STATE_ICE_CONNECTING;
+            if (ret > 0)
+                goto handle_packet;
         }
 
 next_packet:
@@ -1249,12 +1295,14 @@ next_packet:
         /* Got nothing, continue to process handshake. */
         if (ret <= 0 && whip->state < WHIP_STATE_DTLS_CONNECTING)
             continue;
-
+handle_packet:
         /* Handle the ICE binding response. */
         if (ice_is_binding_response(whip->buf, ret)) {
             if (whip->state < WHIP_STATE_ICE_CONNECTED) {
                 whip->state = WHIP_STATE_ICE_CONNECTED;
                 whip->whip_ice_time = av_gettime();
+                whip->ice_host = av_strdup(whip->candidates[whip->candidates_index].host);
+                whip->ice_port = whip->candidates[whip->candidates_index].port;
                 av_log(whip, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%dms\n",
                     whip->state, whip->ice_host, whip->ice_port, whip->whip_resource_url ? whip->whip_resource_url : "",
                     whip->ice_ufrag_remote, whip->ice_ufrag_local, ret, ELAPSED(whip->whip_starttime, av_gettime()));
@@ -1834,7 +1882,10 @@ static av_cold void whip_deinit(AVFormatContext *s)
     av_freep(&whip->whip_resource_url);
     av_freep(&whip->ice_ufrag_remote);
     av_freep(&whip->ice_pwd_remote);
-    av_freep(&whip->ice_protocol);
+    for (i = 0; i < whip->nb_candidates; i++) {
+        av_freep(&whip->candidates[i].host);
+    }
+    av_freep(&whip->candidates);
     av_freep(&whip->ice_host);
     av_freep(&whip->authorization);
     av_freep(&whip->cert_file);
