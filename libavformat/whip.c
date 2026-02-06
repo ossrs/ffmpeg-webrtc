@@ -411,6 +411,7 @@ static av_cold int dtls_initialize(AVFormatContext *s)
     }
     /* reuse the udp created by whip */
     ff_tls_set_external_socket(whip->dtls_uc, whip->udp);
+    whip->dtls_uc->flags |= AVIO_FLAG_NONBLOCK;
 end:
     return ret;
 }

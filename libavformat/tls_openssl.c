@@ -629,6 +629,7 @@ static int dtls_handshake(URLContext *h)
     TLSContext *c = h->priv_data;
 
     c->tls_shared.udp->flags &= ~AVIO_FLAG_NONBLOCK;
+    c->tls_shared.udp->flags |= h->flags & AVIO_FLAG_NONBLOCK;
 
     r0 = SSL_do_handshake(c->ssl);
     if (r0 <= 0) {
