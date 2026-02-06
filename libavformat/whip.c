@@ -189,6 +189,10 @@ enum WHIPState {
     WHIP_STATE_UDP_CONNECTED,
     /* The muxer has sent the ICE request to the peer. */
     WHIP_STATE_ICE_CONNECTING,
+    /* The muxer has checked the ICE candidate connectivity. */
+    WHIP_STATE_ICE_CHECKED,
+    /* The muxer has nominated the ICE candidate. (send USE-CANDIDATE) */
+    WHIP_STATE_ICE_NOMINATED,
     /* The muxer has received the ICE response from the peer. */
     WHIP_STATE_ICE_CONNECTED,
     /* The muxer has finished the DTLS handshake with the peer. */
@@ -1060,9 +1064,12 @@ static int ice_create_request(AVFormatContext *s, uint8_t *buf, int buf_size, in
     avio_write(pb, username, ret); /* bytes of username */
     ffio_fill(pb, 0, (4 - (ret % 4)) % 4); /* padding */
 
-    /* Write the use-candidate attribute */
-    avio_wb16(pb, STUN_ATTR_USE_CANDIDATE); /* attribute type use-candidate */
-    avio_wb16(pb, 0); /* size of use-candidate */
+    if (whip->state >= WHIP_STATE_ICE_CHECKED && whip->state < WHIP_STATE_ICE_CONNECTED) {
+        whip->state = WHIP_STATE_ICE_NOMINATED;
+        /* Write the use-candidate attribute */
+        avio_wb16(pb, STUN_ATTR_USE_CANDIDATE); /* attribute type use-candidate */
+        avio_wb16(pb, 0); /* size of use-candidate */
+    }
 
     avio_wb16(pb, STUN_ATTR_PRIORITY);
     avio_wb16(pb, 4);
@@ -1307,8 +1314,10 @@ static int ice_dtls_handshake(AVFormatContext *s)
         return AVERROR(EINVAL);
     }
 
+    whip->state = WHIP_STATE_ICE_CONNECTING;
+
     while (1) {
-        if (whip->state <= WHIP_STATE_ICE_CONNECTING) {
+        if (whip->state < WHIP_STATE_ICE_CONNECTED) {
             /* Build the STUN binding request. */
             ret = ice_create_request(s, whip->buf, sizeof(whip->buf), &size);
             if (ret < 0) {
@@ -1321,9 +1330,6 @@ static int ice_dtls_handshake(AVFormatContext *s)
                 av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
                 goto end;
             }
-
-            if (whip->state < WHIP_STATE_ICE_CONNECTING)
-                whip->state = WHIP_STATE_ICE_CONNECTING;
         }
 
 next_packet:
@@ -1358,6 +1364,8 @@ next_packet:
 
         /* Handle the ICE binding response. */
         if (ice_is_binding_response(whip->buf, ret)) {
+            if (whip->state < WHIP_STATE_ICE_CHECKED)
+                whip->state = WHIP_STATE_ICE_CHECKED;
             if (whip->state < WHIP_STATE_ICE_CONNECTED) {
                 if (whip->is_peer_ice_lite)
                     whip->state = WHIP_STATE_ICE_CONNECTED;
