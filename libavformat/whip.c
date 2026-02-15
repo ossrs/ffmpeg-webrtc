@@ -87,6 +87,9 @@
  */
 #define STUN_HOST_CANDIDATE_PRIORITY 126 << 24 | 65535 << 8 | 255
 
+#define WHIP_UDP_PORT_MIN 5000
+#define WHIP_UDP_PORT_MAX 65000
+
 /**
  * Maximum size of the buffer for sending and receiving UDP packets.
  * Please note that this size does not limit the size of the UDP packet that can be sent.
@@ -185,8 +188,8 @@ enum WHIPState {
      * in the offer that it generated.
      */
     WHIP_STATE_NEGOTIATED,
-    /* The muxer has connected to the peer via UDP. */
-    WHIP_STATE_UDP_CONNECTED,
+    /* The muxer has opened the UDP socket. */
+    WHIP_STATE_UDP_OPENED,
     /* The muxer has sent the ICE request to the peer. */
     WHIP_STATE_ICE_CONNECTING,
     /* The muxer has checked the ICE candidate connectivity. */
@@ -257,6 +260,8 @@ typedef struct WHIPContext {
      * DTLS, and ICE information.
      */
     char *sdp_offer;
+
+    int udp_port_min, udp_port_max;
 
     int is_peer_ice_lite;
     uint64_t ice_tie_breaker; // random 64 bit, for ICE-CONTROLLING
@@ -1270,20 +1275,36 @@ static int udp_connect(AVFormatContext *s)
     char url[256];
     AVDictionary *opts = NULL;
     WHIPContext *whip = s->priv_data;
+    int port_off = 0, port, bound_port = 0;
 
-    /* Build UDP URL and create the UDP context as transport. */
-    ff_url_join(url, sizeof(url), "udp", NULL, whip->ice_host, whip->ice_port, NULL);
+    if (whip->udp_port_min > 0 && whip->udp_port_max > 0) {
+        port_off = av_get_random_seed() % ((whip->udp_port_max - whip->udp_port_min)/2);
+        port_off -= port_off & 0x01;
+    }
+    port = whip->udp_port_min + port_off;
 
-    av_dict_set_int(&opts, "connect", 1, 0);
-    av_dict_set_int(&opts, "fifo_size", 0, 0);
-    /* Pass through the pkt_size and buffer_size to underling protocol */
-    av_dict_set_int(&opts, "pkt_size", whip->pkt_size, 0);
-    av_dict_set_int(&opts, "buffer_size", whip->ts_buffer_size, 0);
+    while (port <= whip->udp_port_max) {
+        av_dict_set_int(&opts, "connect", 0, 0);
+        av_dict_set_int(&opts, "fifo_size", 0, 0);
+        /* Pass through the pkt_size and buffer_size to underling protocol */
+        av_dict_set_int(&opts, "pkt_size", whip->pkt_size, 0);
+        av_dict_set_int(&opts, "buffer_size", whip->ts_buffer_size, 0);
 
-    ret = ffurl_open_whitelist(&whip->udp, url, AVIO_FLAG_WRITE, &s->interrupt_callback,
-        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
+        ff_url_join(url, sizeof(url), "udp", NULL, whip->ice_host, -1, "?localport=%d", port);
+        ret = ffurl_open_whitelist(&whip->udp, url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
+                                &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
+        av_dict_free(&opts);
+
+        if (!ret) {
+            bound_port = port;
+            break;
+        }
+        port++;
+    }
+
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", whip->ice_host, whip->ice_port);
+        av_log(whip, AV_LOG_ERROR, "Failed to open UDP port in range %d-%d\n",
+               whip->udp_port_min, whip->udp_port_max);
         goto end;
     }
 
@@ -1291,11 +1312,11 @@ static int udp_connect(AVFormatContext *s)
     ff_socket_nonblock(ffurl_get_file_handle(whip->udp), 1);
     whip->udp->flags |= AVIO_FLAG_READ | AVIO_FLAG_NONBLOCK;
 
-    if (whip->state < WHIP_STATE_UDP_CONNECTED)
-        whip->state = WHIP_STATE_UDP_CONNECTED;
+    if (whip->state < WHIP_STATE_UDP_OPENED)
+        whip->state = WHIP_STATE_UDP_OPENED;
     whip->whip_udp_time = av_gettime_relative();
-    av_log(whip, AV_LOG_VERBOSE, "UDP state=%d, elapsed=%.2fms, connected to udp://%s:%d\n",
-        whip->state, ELAPSED(whip->whip_starttime, av_gettime_relative()), whip->ice_host, whip->ice_port);
+    av_log(whip, AV_LOG_VERBOSE, "UDP state=%d, elapsed=%.2fms, open udp local port:%d\n",
+        whip->state, ELAPSED(whip->whip_starttime, av_gettime_relative()), bound_port);
 
 end:
     av_dict_free(&opts);
@@ -1309,8 +1330,8 @@ static int ice_dtls_handshake(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE;
 
-    if (whip->state < WHIP_STATE_UDP_CONNECTED || !whip->udp) {
-        av_log(whip, AV_LOG_ERROR, "UDP not connected, state=%d, udp=%p\n", whip->state, whip->udp);
+    if (whip->state < WHIP_STATE_UDP_OPENED || !whip->udp) {
+        av_log(whip, AV_LOG_ERROR, "UDP not opened, state=%d, udp=%p\n", whip->state, whip->udp);
         return AVERROR(EINVAL);
     }
 
@@ -2191,6 +2212,8 @@ static const AVOption options[] = {
     { "timeout",            "Set timeout for socket I/O operations",                    OFFSET(timeout),            AV_OPT_TYPE_DURATION, { .i64 = -1 }, -1, INT_MAX, ENC },
     { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, ENC },
     { "ts_buffer_size",     "The buffer size, in bytes, of underlying protocol",        OFFSET(ts_buffer_size),        AV_OPT_TYPE_INT,    { .i64 = -1 },      -1, INT_MAX, ENC },
+    { "min_port",           "Set minimum local UDP port",                               OFFSET(udp_port_min),       AV_OPT_TYPE_INT,    { .i64 = WHIP_UDP_PORT_MIN }, 0, 65535, ENC },
+    { "max_port",           "Set maximum local UDP port",                               OFFSET(udp_port_max),       AV_OPT_TYPE_INT,    { .i64 = WHIP_UDP_PORT_MAX }, 0, 65535, ENC },
     { "whip_flags",         "Set flags affecting WHIP connection behavior",             OFFSET(flags),              AV_OPT_TYPE_FLAGS,  { .i64 = 0},         0, UINT_MAX, ENC, .unit = "flags" },
     { "dtls_active",        "Set dtls role as active",                                  0,                          AV_OPT_TYPE_CONST,  { .i64 = WHIP_DTLS_ACTIVE}, 0, UINT_MAX, ENC, .unit = "flags" },
     { "rtp_history",        "The number of RTP history items to store",                 OFFSET(hist_sz),            AV_OPT_TYPE_INT,    { .i64 = WHIP_RTP_HISTORY_DEFAULT }, WHIP_RTP_HISTORY_MIN, WHIP_RTP_HISTORY_MAX, ENC },
