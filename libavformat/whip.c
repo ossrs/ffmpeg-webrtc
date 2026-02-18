@@ -164,6 +164,12 @@
 /* Calculate the elapsed time from starttime to endtime in milliseconds. */
 #define ELAPSED(starttime, endtime) ((float)(endtime - starttime) / 1000)
 
+typedef struct Candidate {
+    int port;
+    char foundation[33];
+    char host[129];
+} Candidate;
+
 /* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
 enum STUNAttr {
     STUN_ATTR_USERNAME                  = 0x0006, /// shared secret response/bind request
@@ -349,6 +355,9 @@ typedef struct WHIPContext {
     RtpHistoryItem *hist;
     uint8_t *hist_pool;
     int hist_head;
+
+    Candidate **candidates;
+    int nb_candidates;
 } WHIPContext;
 
 /**
@@ -943,11 +952,14 @@ static int parse_answer(AVFormatContext *s)
                     goto end;
                 }
             }
-        } else if (av_strstart(line, "a=candidate:", &ptr) && !whip->ice_protocol) {
+        } else if (av_strstart(line, "a=candidate:", &ptr)) {
             if (ptr && av_stristr(ptr, "host")) {
                 /* Refer to RFC 5245 15.1 */
-                char foundation[33], protocol[17], host[129];
+                char foundation[33] = { 0 }, protocol[17], host[129];
                 int component_id, priority, port;
+                Candidate *candidate = NULL;
+                int valid = 0;
+
                 ret = sscanf(ptr, "%32s %d %16s %d %128s %d typ host", foundation, &component_id, protocol, &priority, host, &port);
                 if (ret != 6) {
                     av_log(whip, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s\n",
@@ -963,13 +975,33 @@ static int parse_answer(AVFormatContext *s)
                     goto end;
                 }
 
+                for (int i = 0; i < whip->nb_candidates; i++) {
+                    if (!strcmp(whip->candidates[i]->host, host) &&
+                        whip->candidates[i]->port == port)
+                        goto skip_candidate;
+                }
+
+                candidate = av_mallocz(sizeof(Candidate));
+                if (!candidate)
+                    return AVERROR(ENOMEM);
+
+                strcpy(candidate->foundation, foundation);
+                strcpy(candidate->host, host);
+                candidate->port = port;
+
+                dynarray_add(&whip->candidates, &whip->nb_candidates, candidate);
+                valid = 1;
+
                 whip->ice_protocol = av_strdup(protocol);
-                whip->ice_host = av_strdup(host);
-                whip->ice_port = port;
-                if (!whip->ice_protocol || !whip->ice_host) {
+                if (!whip->ice_protocol) {
                     ret = AVERROR(ENOMEM);
                     goto end;
                 }
+skip_candidate:
+                if (valid)
+                    av_log(whip, AV_LOG_TRACE, "Add remote candidate: %s\n", ptr);
+                else
+                    av_log(whip, AV_LOG_TRACE, "Skip remote candidate: %s\n", ptr);
             }
         }
     }
@@ -986,7 +1018,7 @@ static int parse_answer(AVFormatContext *s)
         goto end;
     }
 
-    if (!whip->ice_protocol || !whip->ice_host || !whip->ice_port) {
+    if (!whip->ice_protocol || !whip->candidates || !whip->nb_candidates) {
         av_log(whip, AV_LOG_ERROR, "No ice candidate parsed from %s\n", whip->sdp_answer);
         ret = AVERROR(EINVAL);
         goto end;
@@ -1006,9 +1038,9 @@ static int parse_answer(AVFormatContext *s)
     if (whip->state < WHIP_STATE_NEGOTIATED)
         whip->state = WHIP_STATE_NEGOTIATED;
     whip->whip_answer_time = av_gettime_relative();
-    av_log(whip, AV_LOG_VERBOSE, "SDP state=%d, offer=%zuB, answer=%zuB, ufrag=%s, pwd=%zuB, transport=%s://%s:%d, elapsed=%.2fms\n",
+    av_log(whip, AV_LOG_VERBOSE, "SDP state=%d, offer=%zuB, answer=%zuB, ufrag=%s, pwd=%zuB, candidates number=%d, elapsed=%.2fms\n",
         whip->state, strlen(whip->sdp_offer), strlen(whip->sdp_answer), whip->ice_ufrag_remote, strlen(whip->ice_pwd_remote),
-        whip->ice_protocol, whip->ice_host, whip->ice_port, ELAPSED(whip->whip_starttime, av_gettime_relative()));
+        whip->nb_candidates, ELAPSED(whip->whip_starttime, av_gettime_relative()));
 
 end:
     avio_context_free(&pb);
@@ -1290,7 +1322,7 @@ static int udp_connect(AVFormatContext *s)
         av_dict_set_int(&opts, "pkt_size", whip->pkt_size, 0);
         av_dict_set_int(&opts, "buffer_size", whip->ts_buffer_size, 0);
 
-        ff_url_join(url, sizeof(url), "udp", NULL, whip->ice_host, -1, "?localport=%d", port);
+        ff_url_join(url, sizeof(url), "udp", NULL, whip->candidates[0]->host, -1, "?localport=%d", port);
         ret = ffurl_open_whitelist(&whip->udp, url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
                                 &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
         av_dict_free(&opts);
@@ -1329,6 +1361,10 @@ static int ice_dtls_handshake(AVFormatContext *s)
     int64_t starttime = av_gettime_relative(), now;
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE;
+    char url[256];
+    Candidate **cands = whip->candidates;
+    int cands_idx = 0;
+    int retries = 6;
 
     if (whip->state < WHIP_STATE_UDP_OPENED || !whip->udp) {
         av_log(whip, AV_LOG_ERROR, "UDP not opened, state=%d, udp=%p\n", whip->state, whip->udp);
@@ -1346,11 +1382,31 @@ static int ice_dtls_handshake(AVFormatContext *s)
                 goto end;
             }
 
+            if (!retries) {
+                if (cands_idx + 1 >= whip->nb_candidates) {
+                    av_log(whip, AV_LOG_ERROR, "No candidates valid\n");
+                    ret = AVERROR(EINVAL);
+                    goto end;
+                }
+                /* TODO: try candidate with higher priority */
+                cands_idx++;
+                retries = 6;
+            }
+
+            ff_url_join(url, sizeof(url), "udp", NULL, cands[cands_idx]->host, cands[cands_idx]->port, NULL);
+            ff_udp_set_remote_url(whip->udp, url);
+
+            /* Ensure the ice host and port always valid for DTLS handshake */
+            whip->ice_host = cands[cands_idx]->host;
+            whip->ice_port = cands[cands_idx]->port;
+
             ret = ffurl_write(whip->udp, whip->buf, size);
             if (ret < 0) {
                 av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
                 goto end;
             }
+            if (whip->state < WHIP_STATE_ICE_CHECKED)
+                retries--;
         }
 
 next_packet:
@@ -2163,6 +2219,11 @@ static av_cold void whip_deinit(AVFormatContext *s)
         s->streams[i]->priv_data = NULL;
     }
 
+    for (i = 0; i < whip->nb_candidates; i++) {
+        av_freep(&whip->candidates[i]);
+    }
+    av_freep(&whip->candidates);
+
     av_freep(&whip->hist_pool);
     av_freep(&whip->hist);
     av_freep(&whip->sdp_offer);
@@ -2171,7 +2232,6 @@ static av_cold void whip_deinit(AVFormatContext *s)
     av_freep(&whip->ice_ufrag_remote);
     av_freep(&whip->ice_pwd_remote);
     av_freep(&whip->ice_protocol);
-    av_freep(&whip->ice_host);
     av_freep(&whip->authorization);
     av_freep(&whip->cert_file);
     av_freep(&whip->key_file);
