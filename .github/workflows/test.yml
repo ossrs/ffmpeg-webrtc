@@ -359,17 +359,17 @@ jobs:
         run: exit 1
     runs-on: ubuntu-22.04
 
-  openssl-1-1-0h:
-    name: "With OpenSSL 1.1.0h"
+  openssl-1-1-1:
+    name: "With OpenSSL 1.1.1"
     needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Build OpenSSL 1.1.0h
+      - name: Build OpenSSL 1.1.1
         run: |
           set -euxo pipefail
-          curl -s -L https://www.openssl.org/source/openssl-1.1.0h.tar.gz | tar xz
-          cd openssl-1.1.0h 
+          curl -s -L https://www.openssl.org/source/openssl-1.1.1w.tar.gz | tar xz
+          cd openssl-1.1.1w
           ./config --prefix=$HOME/.release/openssl
           make -j$(nproc) && sudo make install_sw
       - name: Download Test File
@@ -409,14 +409,14 @@ jobs:
         id: streaming
         run: |
           set -euxo pipefail
-          
+
           # Check streams in SRS.
           for ((i=0; i<10; i++)); do
             STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then 
-              echo 'Test OK'; 
+            if [[ "$STREAM" == "livestream" ]]; then
+              echo 'Test OK';
               echo "has_stream=true" >> $GITHUB_OUTPUT
-              break; 
+              break;
             fi
             sleep 3
           done
@@ -427,7 +427,7 @@ jobs:
           fi
       - name: Stop FFmpeg normally
         run: |
-          pkill -SIGINT ffmpeg && sleep 3 || 
+          pkill -SIGINT ffmpeg && sleep 3 ||
             echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -682,7 +682,7 @@ jobs:
       - pion
       - janus
       - asan
-      - openssl-1-1-0h
+      - openssl-1-1-1
       - openssl-3-0
       - openssl-latest
       - generate-patch
