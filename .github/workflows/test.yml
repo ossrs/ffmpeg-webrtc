@@ -177,22 +177,30 @@ jobs:
           go-version: '1.22'
       - name: Verify Go version
         run: go version
-      - name: Start Pion
+      - name: Start Pion and Stream with FFmpeg
         run: |
           set -euxo pipefail
           git clone https://github.com/pion/webrtc.git
           cd webrtc/examples/whip-whep
           go run *.go &
-      - name: Streaming with FFmpeg
-        run: |
-          set -euxo pipefail
+
+          # Wait for Pion to be ready
+          for ((i=0; i<30; i++)); do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/whip | grep -qv "000"; then
+              echo "Pion is ready"
+              break
+            fi
+            echo "Waiting for Pion... ($i)"
+            sleep 1
+          done
+
+          cd $GITHUB_WORKSPACE
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
             -f whip -authorization "seanTest" "http://localhost:8080/whip" \
             1>ffstdout.log 2>ffstderr.log &
-      - name: Stop FFmpeg normally
-        run: |
-          pkill -SIGINT ffmpeg && sleep 3 || 
+          sleep 10
+          pkill -SIGINT ffmpeg && sleep 3 ||
             echo "FFmpeg process not found or already stopped."
       - name: Show FFmpeg Stdout Log
         run: cat ffstdout.log
@@ -203,9 +211,11 @@ jobs:
           set -euxo pipefail
           cat ffstderr.log |grep 'Exiting normally' && exit 0
           echo "Exiting normally not found in ffstderr.log" && exit 1
-      - name: Check Stream Existence
-        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
-        run: exit 1
+      - name: Check FFmpeg Streamed Successfully
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep -v 'Connection refused' |grep 'frame=' |grep -v 'frame=    0' && exit 0
+          echo "FFmpeg did not stream any frames" && exit 1
     runs-on: ubuntu-22.04
 
   janus:
@@ -607,72 +617,161 @@ jobs:
         run: exit 1
     runs-on: ubuntu-22.04
 
-  generate-patch:
-    name: "Generate Patch"
-    if: ${{ github.event_name == 'pull_request' }}
+  gnutls:
+    name: "With GnuTLS"
+    needs: build
     steps:
-      # Checkout to workflows branch, make sure the base branch is available.
-      - name: Checkout repository with workflows branch
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: workflows
-          fetch-depth: 0
-      - name: Try to checkout to workflows branch
-        run: |
-          set -euxo pipefail
-          git checkout workflows
-          git branch -vv
-      # Checkout to PR commit, use the lastest script.
-      - name: Checkout repository to PR commit
-        uses: actions/checkout@v4
-      - name: Show Git Info
-        run: |
-          set -euxo pipefail
-          git branch -vv
-          echo "Repository: ${{ github.repository }}"
-          echo "Ref: ${{ github.ref }}"
-          echo "Event Name: ${{ github.event_name }}"
-          echo "Pull Request Number: ${{ github.event.pull_request.number }}"
-      - name: Install Dependencies
+      - name: Install GnuTLS and Download Test File
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq
-      - name: Run Script
-        id: format_patch
+          sudo apt-get install -y nasm pkg-config jq gnutls-bin libgnutls28-dev
+          curl -s -L -O https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4
+      - name: Build FFmpeg
         run: |
           set -euxo pipefail
 
-          PR_NUMBER=${{ github.event.pull_request.number }}
-          PATCH_FILENAME="whip-patch-$PR_NUMBER-$(date +%s)"
-          TMP_BRANCH="tmp-branch-for-patch-$PR_NUMBER"
-          echo "PR ID is ${{ github.event.pull_request.number }}"
-          echo "Patch file is $PATCH_FILENAME.patch"
-          echo "Temporary branch is $TMP_BRANCH"
+          # Build FFmpeg with WebRTC support using GnuTLS
+          ./configure --enable-muxer=whip --enable-gnutls
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Streaming with FFmpeg
+        run: |
+          set -euxo pipefail
+          nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
 
-          bash .github/scripts/format-patch.sh $PR_NUMBER "$PATCH_FILENAME.patch"
-          echo "patch_file=$PATCH_FILENAME" >> $GITHUB_OUTPUT
-          echo "temporary_branch=$TMP_BRANCH" >> $GITHUB_OUTPUT
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then
+              echo 'Test OK';
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break;
+            fi
+            sleep 3
+          done
 
-          if [[ -f "$PATCH_FILENAME.patch" ]]; then
-            echo "has_patch=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_patch=false" >> $GITHUB_OUTPUT
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            echo "has_stream=false" >> $GITHUB_OUTPUT
           fi
-      - name: Show Branch Info
-        if: ${{ steps.format_patch.outputs.has_patch == 'true' }}
-        run: git show ${{ steps.format_patch.outputs.temporary_branch }}
-      - name: Show Patch File
-        if: ${{ steps.format_patch.outputs.has_patch == 'true' }}
-        run: cat ${{ steps.format_patch.outputs.patch_file }}.patch
-      - name: Upload all patch files
-        if: ${{ steps.format_patch.outputs.has_patch == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.format_patch.outputs.patch_file }}
-          path: |
-            whip-*.patch
-          retention-days: 90
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 ||
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
+    runs-on: ubuntu-22.04
+
+  mbedtls:
+    name: "With mbedTLS 3.6.2"
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build mbedTLS
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config jq cmake
+          curl -s -L https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.2/mbedtls-3.6.2.tar.bz2 | tar xj
+          cd mbedtls-3.6.2
+          scripts/config.py set MBEDTLS_SSL_DTLS_SRTP
+          mkdir build && cd build
+          cmake -DCMAKE_INSTALL_PREFIX=$HOME/.release/mbedtls \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=Off -DENABLE_SHARED=Off -DENABLE_STATIC=On ..
+          make -j$(nproc) && make install
+      - name: Download Test File
+        run: |
+          set -euxo pipefail
+          curl -s -L -O https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+
+          # Build FFmpeg with WebRTC support using mbedTLS
+          PKG_CONFIG_PATH="$HOME/.release/mbedtls/lib/pkgconfig" \
+            ./configure --enable-muxer=whip --enable-mbedtls --enable-version3 \
+            --extra-cflags="-I$HOME/.release/mbedtls/include" \
+            --extra-ldflags="-L$HOME/.release/mbedtls/lib" \
+            --pkg-config-flags="--static"
+          make -j$(nproc)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+
+      - name: Start SRS Docker container
+        run: |
+          set -euxo pipefail
+          ip=$(ifconfig eth0 | grep 'inet ' | awk '{print $2}')
+          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 \
+              --env CANDIDATE=$ip -p 8000:8000/udp \
+              ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
+      - name: Streaming with FFmpeg
+        run: |
+          set -euxo pipefail
+          nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
+            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            1>ffstdout.log 2>ffstderr.log &
+      - name: Check SRS Streaming
+        id: streaming
+        run: |
+          set -euxo pipefail
+
+          # Check streams in SRS.
+          for ((i=0; i<10; i++)); do
+            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
+            if [[ "$STREAM" == "livestream" ]]; then
+              echo 'Test OK';
+              echo "has_stream=true" >> $GITHUB_OUTPUT
+              break;
+            fi
+            sleep 3
+          done
+
+          if [[ "$STREAM" != "livestream" ]]; then
+            echo "Stream not found: $STREAM"
+            echo "has_stream=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Stop FFmpeg normally
+        run: |
+          pkill -SIGINT ffmpeg && sleep 3 ||
+            echo "FFmpeg process not found or already stopped."
+      - name: Show FFmpeg Stdout Log
+        run: cat ffstdout.log
+      - name: Show FFmpeg Stderr Log
+        run: cat ffstderr.log
+      - name: Check FFmpeg Exit Log
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep 'Exiting normally' && exit 0
+          echo "Exiting normally not found in ffstderr.log" && exit 1
+      - name: Check Stream Existence
+        if: ${{ steps.streaming.outputs.has_stream == 'false' }}
+        run: exit 1
     runs-on: ubuntu-22.04
 
   test-done:
@@ -685,7 +784,8 @@ jobs:
       - openssl-1-1-1
       - openssl-3-0
       - openssl-latest
-      - generate-patch
+      - gnutls
+      - mbedtls
     steps:
       - run: echo 'All done'
     runs-on: ubuntu-22.04
