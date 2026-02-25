@@ -15,25 +15,6 @@ permissions: read-all
 #     $(which docker) is /usr/bin/docker
 #     $(ifconfig eth0 | grep 'inet ' | awk '{print $2}') is private IP4 address like 10.1.0.76
 jobs:
-  build:
-    name: "Build FFmpeg"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Build FFmpeg
-        run: |
-          set -euxo pipefail
-
-          # Install dependencies
-          sudo apt-get update
-          sudo apt-get install -y nasm pkg-config libssl-dev
-
-          # Build FFmpeg with WebRTC support
-          ./configure --enable-muxer=whip --enable-openssl --enable-version3
-          make -j$(nproc)
-          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
-    runs-on: ubuntu-22.04
-
   fate:
     name: "FFmpeg Fate Test"
     steps:
@@ -83,7 +64,6 @@ jobs:
 
   srs:
     name: "FFmpeg with SRS"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -154,7 +134,6 @@ jobs:
 
   pion:
     name: "FFmpeg with Pion"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -220,7 +199,6 @@ jobs:
 
   janus:
     name: "FFmpeg with Janus"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -291,7 +269,6 @@ jobs:
 
   asan:
     name: "FFmpeg with Asan"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -371,7 +348,6 @@ jobs:
 
   openssl-1-1-1:
     name: "With OpenSSL 1.1.1"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -455,7 +431,6 @@ jobs:
 
   openssl-3-0:
     name: "With OpenSSL 3.0"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -537,7 +512,6 @@ jobs:
 
   openssl-latest:
     name: "With OpenSSL latest"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -619,7 +593,6 @@ jobs:
 
   gnutls:
     name: "With GnuTLS"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -690,7 +663,6 @@ jobs:
 
   mbedtls:
     name: "With mbedTLS 3.6.2"
-    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
