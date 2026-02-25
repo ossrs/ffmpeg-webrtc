@@ -1,0 +1,48 @@
+name: "Auto Rebase"
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    name: "Rebase from upstream FFmpeg"
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [master, workflows]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/FFmpeg/FFmpeg.git
+
+      - name: Fetch upstream master
+        run: git fetch upstream master
+
+      - name: Rebase on upstream master
+        run: |
+          set -euxo pipefail
+          echo "Current branch: ${{ matrix.branch }}"
+          echo "Current HEAD: $(git log --oneline -1)"
+          git rebase upstream/master
+          echo "New HEAD: $(git log --oneline -1)"
+
+      - name: Push changes
+        run: git push origin ${{ matrix.branch }} --force-with-lease
