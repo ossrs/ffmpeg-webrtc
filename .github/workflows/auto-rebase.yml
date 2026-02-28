@@ -50,6 +50,12 @@ jobs:
 
       - name: Trigger test workflow
         if: matrix.branch == 'workflows'
-        run: gh workflow run test.yml --ref ${{ matrix.branch }}
+        run: |
+          WORKFLOW_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows" \
+            -q '.workflows[] | select(.path==".github/workflows/test.yml") | .id')
+          if [ -n "$WORKFLOW_ID" ]; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/dispatches" \
+              -f ref=workflows
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
