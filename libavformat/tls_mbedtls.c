@@ -381,8 +381,12 @@ static int mbedtls_recv(void *ctx, unsigned char *buf, size_t len)
     TLSContext *tls_ctx = (TLSContext*) ctx;
     TLSShared *shr = &tls_ctx->tls_shared;
     URLContext *h = shr->is_dtls ? shr->udp : shr->tcp;
-    int ret = ffurl_read(h, buf, len);
-    if (ret >= 0) {
+    int ret;
+
+    do {
+        ret = ffurl_read(h, buf, len);
+        if (ret <= 0)
+            break;
         if (shr->is_dtls && shr->listen && !tls_ctx->dest_addr_len) {
             int err_ret;
 
@@ -394,8 +398,11 @@ static int mbedtls_recv(void *ctx, unsigned char *buf, size_t len)
             }
             av_log(tls_ctx, AV_LOG_TRACE, "Set UDP remote addr on UDP socket, now 'connected'\n");
         }
+        /* Skip non-DTLS packets such as STUN to avoid handshake failures. */
+    } while (shr->is_dtls && (buf[0] < 20 || buf[0] > 63));
+
+    if (ret >= 0)
         return ret;
-    }
     if (h->max_packet_size && len > h->max_packet_size)
         return MBEDTLS_ERR_SSL_BUFFER_TOO_SMALL;
 
