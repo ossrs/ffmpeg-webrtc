@@ -743,6 +743,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ffmpeg-windows-${{ matrix.tls }}
+      - name: Download Test File
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4" -OutFile "bbb-4mbps-baseline-opus.mp4"
       - name: Verify FFmpeg
         shell: pwsh
         run: |
@@ -774,7 +778,7 @@ jobs:
           }
 
           cd $env:GITHUB_WORKSPACE
-          Start-Process -NoNewWindow -FilePath ".\ffmpeg.exe" -ArgumentList "-t","30","-re","-f","lavfi","-i","testsrc=size=1280x720","-f","lavfi","-i","sine=frequency=440","-pix_fmt","yuv420p","-vcodec","libx264","-profile:v","baseline","-r","25","-g","50","-f","whip","-authorization","seanTest","http://localhost:8080/whip" -RedirectStandardOutput ffstdout.log -RedirectStandardError ffstderr.log
+          Start-Process -NoNewWindow -FilePath ".\ffmpeg.exe" -ArgumentList "-t","30","-re","-i","bbb-4mbps-baseline-opus.mp4","-c","copy","-f","whip","-authorization","seanTest","http://localhost:8080/whip" -RedirectStandardOutput ffstdout.log -RedirectStandardError ffstderr.log
           Start-Sleep -Seconds 10
           Get-Process ffmpeg -ErrorAction SilentlyContinue | Stop-Process
           Start-Sleep -Seconds 3
@@ -847,6 +851,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ffmpeg-macos-${{ matrix.tls }}
+      - name: Download Test File
+        run: |
+          set -euxo pipefail
+          curl -s -L -O https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4
       - name: Verify FFmpeg
         run: |
           chmod +x ./ffmpeg
@@ -873,8 +881,7 @@ jobs:
           done
 
           cd $GITHUB_WORKSPACE
-          nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
-            -vcodec libx264 -profile:v baseline -r 25 -g 50 \
+          nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
             -f whip -authorization "seanTest" "http://localhost:8080/whip" \
             1>ffstdout.log 2>ffstderr.log &
           sleep 10
