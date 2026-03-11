@@ -722,7 +722,7 @@ jobs:
           cmake -G "MSYS Makefiles" -DCMAKE_INSTALL_PREFIX=$HOME/.release/mbedtls \
             -DUSE_SHARED_MBEDTLS_LIBRARY=Off -DENABLE_SHARED=Off -DENABLE_STATIC=On \
             -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off \
-            -DCMAKE_C_FLAGS="-Wno-error" ..
+            -DCMAKE_C_FLAGS="-Wno-error=stringop-truncation -Wno-stringop-truncation" ..
           make -j$(nproc) && make install
       - name: Build FFmpeg
         shell: msys2 {0}
