@@ -681,6 +681,243 @@ jobs:
         run: exit 1
     runs-on: ubuntu-22.04
 
+  build-windows:
+    name: "Build FFmpeg on Windows (${{ matrix.tls }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        tls: [openssl, gnutls]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-cmake
+      - name: Install TLS dependencies
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          if [[ "${{ matrix.tls }}" == "openssl" ]]; then
+            pacman -S --noconfirm mingw-w64-x86_64-openssl
+          elif [[ "${{ matrix.tls }}" == "gnutls" ]]; then
+            pacman -S --noconfirm mingw-w64-x86_64-gnutls
+          fi
+      - name: Build FFmpeg
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          if [[ "${{ matrix.tls }}" == "openssl" ]]; then
+            ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          elif [[ "${{ matrix.tls }}" == "gnutls" ]]; then
+            ./configure --enable-muxer=whip --enable-gnutls
+          fi
+          make -j$(nproc)
+          ./ffmpeg.exe -version && ./ffmpeg.exe -muxers 2>/dev/null |grep whip
+      - name: Upload FFmpeg binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-windows-${{ matrix.tls }}
+          path: ./ffmpeg.exe
+          retention-days: 1
+    runs-on: windows-latest
+
+  test-windows:
+    name: "Test FFmpeg on Windows (${{ matrix.tls }})"
+    needs: build-windows
+    strategy:
+      fail-fast: false
+      matrix:
+        tls: [openssl, gnutls]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download FFmpeg binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows-${{ matrix.tls }}
+      - name: Download Test File
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4" -OutFile "bbb-4mbps-baseline-opus.mp4"
+      - name: Verify FFmpeg
+        shell: pwsh
+        run: |
+          .\ffmpeg.exe -version
+          .\ffmpeg.exe -muxers 2>$null | Select-String "whip"
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.22'
+      - name: Start Pion and Stream with FFmpeg
+        shell: pwsh
+        run: |
+          git clone https://github.com/pion/webrtc.git
+          cd webrtc/examples/whip-whep
+          Start-Process -NoNewWindow -FilePath "go" -ArgumentList "run","." -RedirectStandardOutput pion-stdout.log -RedirectStandardError pion-stderr.log
+
+          # Wait for Pion to be ready
+          for ($i=0; $i -lt 30; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:8080/whip" -Method Head -ErrorAction SilentlyContinue
+              if ($response.StatusCode -ne 0) {
+                Write-Host "Pion is ready"
+                break
+              }
+            } catch {
+              Write-Host "Waiting for Pion... ($i)"
+              Start-Sleep -Seconds 1
+            }
+          }
+
+          cd $env:GITHUB_WORKSPACE
+          Start-Process -NoNewWindow -FilePath ".\ffmpeg.exe" -ArgumentList "-t","30","-re","-i","bbb-4mbps-baseline-opus.mp4","-c","copy","-f","whip","-authorization","seanTest","http://localhost:8080/whip" -RedirectStandardOutput ffstdout.log -RedirectStandardError ffstderr.log
+          Start-Sleep -Seconds 10
+          Get-Process ffmpeg -ErrorAction SilentlyContinue | Stop-Process
+          Start-Sleep -Seconds 3
+      - name: Show FFmpeg Logs
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path ffstdout.log) { Get-Content ffstdout.log }
+          if (Test-Path ffstderr.log) { Get-Content ffstderr.log }
+      - name: Check FFmpeg Streamed Successfully
+        shell: pwsh
+        run: |
+          $stderr = Get-Content ffstderr.log -Raw
+          if ($stderr -match "frame=\s+\d+" -and $stderr -notmatch "frame=\s+0\s") {
+            Write-Host "FFmpeg streamed successfully"
+            exit 0
+          }
+          Write-Host "FFmpeg did not stream any frames"
+          exit 1
+    runs-on: windows-latest
+
+  build-macos:
+    name: "Build FFmpeg on macOS (${{ matrix.tls }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        tls: [openssl, gnutls, mbedtls]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          brew install nasm pkg-config
+          if [[ "${{ matrix.tls }}" == "openssl" ]]; then
+            brew install openssl@3
+          elif [[ "${{ matrix.tls }}" == "gnutls" ]]; then
+            brew install gnutls
+          elif [[ "${{ matrix.tls }}" == "mbedtls" ]]; then
+            brew install cmake
+          fi
+      - name: Build mbedTLS
+        if: matrix.tls == 'mbedtls'
+        run: |
+          set -euxo pipefail
+          curl -s -L https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.2/mbedtls-3.6.2.tar.bz2 | tar xj
+          cd mbedtls-3.6.2
+          scripts/config.py set MBEDTLS_SSL_DTLS_SRTP
+          mkdir build && cd build
+          cmake -DCMAKE_INSTALL_PREFIX=$HOME/.release/mbedtls \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=Off -DENABLE_SHARED=Off -DENABLE_STATIC=On \
+            -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off ..
+          make -j$(sysctl -n hw.ncpu) && make install
+      - name: Build FFmpeg
+        run: |
+          set -euxo pipefail
+          if [[ "${{ matrix.tls }}" == "openssl" ]]; then
+            PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig" \
+              ./configure --enable-muxer=whip --enable-openssl --enable-version3
+          elif [[ "${{ matrix.tls }}" == "gnutls" ]]; then
+            ./configure --enable-muxer=whip --enable-gnutls
+          elif [[ "${{ matrix.tls }}" == "mbedtls" ]]; then
+            PKG_CONFIG_PATH="$HOME/.release/mbedtls/lib/pkgconfig" \
+              ./configure --enable-muxer=whip --enable-mbedtls --enable-version3 \
+              --extra-cflags="-I$HOME/.release/mbedtls/include" \
+              --extra-ldflags="-L$HOME/.release/mbedtls/lib" \
+              --pkg-config-flags="--static"
+          fi
+          make -j$(sysctl -n hw.ncpu)
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Upload FFmpeg binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-macos-${{ matrix.tls }}
+          path: ./ffmpeg
+          retention-days: 1
+    runs-on: macos-latest
+
+  test-macos:
+    name: "Test FFmpeg on macOS (${{ matrix.tls }})"
+    needs: build-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        tls: [openssl, gnutls, mbedtls]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download FFmpeg binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-macos-${{ matrix.tls }}
+      - name: Download Test File
+        run: |
+          set -euxo pipefail
+          curl -s -L -O https://github.com/ossrs/ffmpeg-webrtc/releases/download/pre-release/bbb-4mbps-baseline-opus.mp4
+      - name: Verify FFmpeg
+        run: |
+          chmod +x ./ffmpeg
+          ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.22'
+      - name: Start Pion and Stream with FFmpeg
+        run: |
+          set -euxo pipefail
+          git clone https://github.com/pion/webrtc.git
+          cd webrtc/examples/whip-whep
+          go run *.go &
+
+          # Wait for Pion to be ready
+          for ((i=0; i<30; i++)); do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/whip | grep -qv "000"; then
+              echo "Pion is ready"
+              break
+            fi
+            echo "Waiting for Pion... ($i)"
+            sleep 1
+          done
+
+          cd $GITHUB_WORKSPACE
+          nohup ./ffmpeg -t 30 -re -i bbb-4mbps-baseline-opus.mp4 -c copy \
+            -f whip -authorization "seanTest" "http://localhost:8080/whip" \
+            1>ffstdout.log 2>ffstderr.log &
+          sleep 10
+          pkill -SIGINT ffmpeg && sleep 3 || echo "FFmpeg process not found"
+      - name: Show FFmpeg Logs
+        if: always()
+        run: |
+          cat ffstdout.log || true
+          cat ffstderr.log || true
+      - name: Check FFmpeg Streamed Successfully
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep -v 'Connection refused' |grep 'frame=' |grep -v 'frame=    0' && exit 0
+          echo "FFmpeg did not stream any frames" && exit 1
+    runs-on: macos-latest
+
   test-done:
     needs:
       - fate
@@ -692,6 +929,10 @@ jobs:
       - openssl-1-1-1
       - openssl-3-0
       - openssl-latest
+      - build-windows
+      - test-windows
+      - build-macos
+      - test-macos
     steps:
       - run: echo 'All done'
     runs-on: ubuntu-22.04
