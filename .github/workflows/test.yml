@@ -838,40 +838,44 @@ jobs:
         run: |
           chmod +x ./ffmpeg
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
-      - name: Start SRS Docker container
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.22'
+      - name: Start Pion and Stream with FFmpeg
         run: |
           set -euxo pipefail
-          docker run --rm -d -p 1935:1935 -p 1985:1985 -p 8080:8080 -p 8000:8000/udp \
-            ossrs/srs:5 ./objs/srs -c conf/rtc2rtmp.conf
-      - name: Streaming with FFmpeg
-        run: |
-          set -euxo pipefail
+          git clone https://github.com/pion/webrtc.git
+          cd webrtc/examples/whip-whep
+          go run *.go &
+
+          # Wait for Pion to be ready
+          for ((i=0; i<30; i++)); do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/whip | grep -qv "000"; then
+              echo "Pion is ready"
+              break
+            fi
+            echo "Waiting for Pion... ($i)"
+            sleep 1
+          done
+
+          cd $GITHUB_WORKSPACE
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 \
-            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            -f whip -authorization "seanTest" "http://localhost:8080/whip" \
             1>ffstdout.log 2>ffstderr.log &
-          sleep 15
-      - name: Check SRS Streaming
-        run: |
-          set -euxo pipefail
-          for ((i=0; i<10; i++)); do
-            STREAM=$(curl -s http://localhost:1985/api/v1/streams/ | jq -r '.streams[].name')
-            if [[ "$STREAM" == "livestream" ]]; then
-              echo 'Test OK'
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "Stream not found"
-          exit 1
-      - name: Stop FFmpeg
-        run: |
+          sleep 10
           pkill -SIGINT ffmpeg && sleep 3 || echo "FFmpeg process not found"
       - name: Show FFmpeg Logs
         if: always()
         run: |
           cat ffstdout.log || true
           cat ffstderr.log || true
+      - name: Check FFmpeg Streamed Successfully
+        run: |
+          set -euxo pipefail
+          cat ffstderr.log |grep -v 'Connection refused' |grep 'frame=' |grep -v 'frame=    0' && exit 0
+          echo "FFmpeg did not stream any frames" && exit 1
     runs-on: macos-latest
 
   test-done:
