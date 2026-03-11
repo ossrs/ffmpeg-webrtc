@@ -805,7 +805,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tls: [openssl, gnutls]
+        tls: [openssl, gnutls, mbedtls]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -817,7 +817,21 @@ jobs:
             brew install openssl@3
           elif [[ "${{ matrix.tls }}" == "gnutls" ]]; then
             brew install gnutls
+          elif [[ "${{ matrix.tls }}" == "mbedtls" ]]; then
+            brew install cmake
           fi
+      - name: Build mbedTLS
+        if: matrix.tls == 'mbedtls'
+        run: |
+          set -euxo pipefail
+          curl -s -L https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.2/mbedtls-3.6.2.tar.bz2 | tar xj
+          cd mbedtls-3.6.2
+          scripts/config.py set MBEDTLS_SSL_DTLS_SRTP
+          mkdir build && cd build
+          cmake -DCMAKE_INSTALL_PREFIX=$HOME/.release/mbedtls \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=Off -DENABLE_SHARED=Off -DENABLE_STATIC=On \
+            -DENABLE_TESTING=Off -DENABLE_PROGRAMS=Off ..
+          make -j$(sysctl -n hw.ncpu) && make install
       - name: Build FFmpeg
         run: |
           set -euxo pipefail
@@ -826,6 +840,12 @@ jobs:
               ./configure --enable-muxer=whip --enable-openssl --enable-version3
           elif [[ "${{ matrix.tls }}" == "gnutls" ]]; then
             ./configure --enable-muxer=whip --enable-gnutls
+          elif [[ "${{ matrix.tls }}" == "mbedtls" ]]; then
+            PKG_CONFIG_PATH="$HOME/.release/mbedtls/lib/pkgconfig" \
+              ./configure --enable-muxer=whip --enable-mbedtls --enable-version3 \
+              --extra-cflags="-I$HOME/.release/mbedtls/include" \
+              --extra-ldflags="-L$HOME/.release/mbedtls/lib" \
+              --pkg-config-flags="--static"
           fi
           make -j$(sysctl -n hw.ncpu)
           ./ffmpeg -version && ./ffmpeg -muxers 2>/dev/null |grep whip
@@ -843,7 +863,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tls: [openssl, gnutls]
+        tls: [openssl, gnutls, mbedtls]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
