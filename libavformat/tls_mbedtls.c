@@ -394,6 +394,9 @@ static int mbedtls_recv(void *ctx, unsigned char *buf, size_t len)
             }
             av_log(tls_ctx, AV_LOG_TRACE, "Set UDP remote addr on UDP socket, now 'connected'\n");
         }
+        /* Skip non-DTLS packets such as STUN to avoid failures. */
+        if (shr->is_dtls && !ff_is_dtls_packet(buf, ret))
+            return MBEDTLS_ERR_SSL_WANT_READ;
         return ret;
     }
     if (h->max_packet_size && len > h->max_packet_size)

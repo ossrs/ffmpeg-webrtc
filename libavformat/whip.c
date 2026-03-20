@@ -88,28 +88,6 @@
 #define STUN_HOST_CANDIDATE_PRIORITY 126 << 24 | 65535 << 8 | 255
 
 /**
- * The DTLS content type.
- * See https://tools.ietf.org/html/rfc2246#section-6.2.1
- * change_cipher_spec(20), alert(21), handshake(22), application_data(23)
- */
-#define DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC 20
-
-/**
- * The DTLS record layer header has a total size of 13 bytes, consisting of
- * ContentType (1 byte), ProtocolVersion (2 bytes), Epoch (2 bytes),
- * SequenceNumber (6 bytes), and Length (2 bytes).
- * See https://datatracker.ietf.org/doc/html/rfc9147#section-4
- */
-#define DTLS_RECORD_LAYER_HEADER_LEN 13
-
-/**
- * The DTLS version number, which is 0xfeff for DTLS 1.0, or 0xfefd for DTLS 1.2.
- * See https://datatracker.ietf.org/doc/html/rfc9147#name-the-dtls-record-layer
- */
-#define DTLS_VERSION_10 0xfeff
-#define DTLS_VERSION_12 0xfefd
-
-/**
  * Maximum size of the buffer for sending and receiving UDP packets.
  * Please note that this size does not limit the size of the UDP packet that can be sent.
  * To set the limit for packet size, modify the `pkt_size` parameter.
@@ -361,21 +339,6 @@ typedef struct WHIPContext {
     uint8_t *hist_pool;
     int hist_head;
 } WHIPContext;
-
-/**
- * Whether the packet is a DTLS packet.
- */
-static int is_dtls_packet(uint8_t *b, int size)
-{
-    int ret = 0;
-    if (size > DTLS_RECORD_LAYER_HEADER_LEN) {
-        uint16_t version = AV_RB16(&b[1]);
-        ret = b[0] >= DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC &&
-            (version == DTLS_VERSION_10 || version == DTLS_VERSION_12);
-    }
-    return ret;
-}
-
 
 /**
  * Get or Generate a self-signed certificate and private key for DTLS,
@@ -1386,7 +1349,7 @@ next_packet:
         }
 
         /* Handle DTLS handshake */
-        if (is_dtls_packet(whip->buf, ret) || is_dtls_active) {
+        if (ff_is_dtls_packet(whip->buf, ret) || is_dtls_active) {
             whip->whip_ice_time = av_gettime_relative();
             /* Start consent timer when ICE selected */
             whip->whip_last_consent_tx_time = whip->whip_last_consent_rx_time = whip->whip_ice_time;
@@ -2062,7 +2025,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
         whip->whip_last_consent_rx_time = av_gettime_relative();
         av_log(whip, AV_LOG_DEBUG, "Consent Freshness check received\n");
     }
-    if (is_dtls_packet(whip->buf, ret)) {
+    if (ff_is_dtls_packet(whip->buf, ret)) {
         if ((ret = ffurl_write(whip->dtls_uc, whip->buf, ret)) < 0) {
             av_log(whip, AV_LOG_ERROR, "Failed to handle DTLS message\n");
             goto end;

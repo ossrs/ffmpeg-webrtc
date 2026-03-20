@@ -34,6 +34,26 @@
  */
 #define MAX_CERTIFICATE_SIZE 8192
 
+/**
+ * The DTLS content type.
+ * See https://tools.ietf.org/html/rfc2246#section-6.2.1
+ * change_cipher_spec(20), alert(21), handshake(22), application_data(23)
+ */
+#define DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC 20
+/**
+ * The DTLS record layer header has a total size of 13 bytes, consisting of
+ * ContentType (1 byte), ProtocolVersion (2 bytes), Epoch (2 bytes),
+ * SequenceNumber (6 bytes), and Length (2 bytes).
+ * See https://datatracker.ietf.org/doc/html/rfc9147#section-4
+ */
+#define DTLS_RECORD_LAYER_HEADER_LEN 13
+/**
+ * The DTLS version number, which is 0xfeff for DTLS 1.0, or 0xfefd for DTLS 1.2.
+ * See https://datatracker.ietf.org/doc/html/rfc9147#name-the-dtls-record-layer
+ */
+#define DTLS_VERSION_10 0xfeff
+#define DTLS_VERSION_12 0xfefd
+
 typedef struct TLSShared {
     const AVClass *class;
     char *ca_file;
@@ -112,5 +132,10 @@ void ff_gnutls_deinit(void);
 
 int ff_openssl_init(void);
 void ff_openssl_deinit(void);
+
+/**
+ * Whether the packet is a DTLS packet, as defined by RFC 5764 Section 5.1.2.
+ */
+int ff_is_dtls_packet(const uint8_t *buf, int size);
 
 #endif /* AVFORMAT_TLS_H */

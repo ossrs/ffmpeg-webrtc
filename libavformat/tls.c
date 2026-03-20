@@ -28,6 +28,7 @@
 #include "tls.h"
 #include "libavutil/avstring.h"
 #include "libavutil/getenv_utf8.h"
+#include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/parseutils.h"
 
@@ -150,4 +151,14 @@ end:
     ffurl_closep(&uc);
     av_dict_free(&opts);
     return ret;
+}
+
+int ff_is_dtls_packet(const uint8_t *buf, int size)
+{
+    if (size > DTLS_RECORD_LAYER_HEADER_LEN) {
+        uint16_t version = AV_RB16(&buf[1]);
+        return buf[0] >= DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC &&
+               (version == DTLS_VERSION_10 || version == DTLS_VERSION_12);
+    }
+    return 0;
 }
