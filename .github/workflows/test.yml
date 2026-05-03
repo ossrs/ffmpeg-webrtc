@@ -123,12 +123,13 @@ jobs:
     runs-on: ubuntu-22.04
 
   srs:
-    name: "SRS with FFmpeg (${{ matrix.tls }})"
+    name: "SRS with FFmpeg (${{ matrix.tls }}, dtls=${{ matrix.dtls_role }})"
     needs: build
     strategy:
       fail-fast: false
       matrix:
         tls: [openssl, gnutls, mbedtls]
+        dtls_role: [passive, active]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -160,9 +161,14 @@ jobs:
       - name: Streaming with FFmpeg
         run: |
           set -euxo pipefail
+          if [[ "${{ matrix.dtls_role }}" == "active" ]]; then
+            WHIP_FLAGS="-whip_flags +dtls_active"
+          else
+            WHIP_FLAGS=""
+          fi
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
-            -f whip "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
+            -f whip $WHIP_FLAGS "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
             1>ffstdout.log 2>ffstderr.log &
       - name: Check SRS Streaming
         id: streaming
@@ -203,12 +209,13 @@ jobs:
     runs-on: ubuntu-22.04
 
   pion:
-    name: "Pion with FFmpeg (${{ matrix.tls }})"
+    name: "Pion with FFmpeg (${{ matrix.tls }}, dtls=${{ matrix.dtls_role }})"
     needs: build
     strategy:
       fail-fast: false
       matrix:
         tls: [openssl, gnutls, mbedtls]
+        dtls_role: [passive, active]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -254,9 +261,14 @@ jobs:
           done
 
           cd $GITHUB_WORKSPACE
+          if [[ "${{ matrix.dtls_role }}" == "active" ]]; then
+            WHIP_FLAGS="-whip_flags +dtls_active"
+          else
+            WHIP_FLAGS=""
+          fi
           nohup ./ffmpeg -t 30 -re -f lavfi -i testsrc=size=1280x720 -f lavfi -i sine=frequency=440 -pix_fmt yuv420p \
             -vcodec libx264 -profile:v baseline -r 25 -g 50 -acodec libopus -ar 48000 -ac 2 \
-            -f whip -authorization "seanTest" "http://localhost:8080/whip" \
+            -f whip $WHIP_FLAGS -authorization "seanTest" "http://localhost:8080/whip" \
             1>ffstdout.log 2>ffstderr.log &
           sleep 10
           pkill -SIGINT ffmpeg && sleep 3 ||
