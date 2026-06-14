@@ -70,12 +70,8 @@
 
 #define WHIP_US_PER_MS 1000
 
-/**
- * If we try to read from UDP and get EAGAIN, we sleep for 5ms and retry up to 10 times.
- * This will limit the total duration (in milliseconds, 50ms)
- */
-#define ICE_DTLS_READ_MAX_RETRY 10
-#define ICE_DTLS_READ_SLEEP_DURATION 5
+/* Timeout in ms for poll() waiting for incoming UDP packets during ICE/DTLS. */
+#define ICE_DTLS_READ_INTERVAL 500
 
 /* The magic cookie for Session Traversal Utilities for NAT (STUN) messages. */
 #define STUN_MAGIC_COOKIE 0x2112A442
@@ -1357,7 +1353,7 @@ end:
 
 static int ice_dtls_handshake(AVFormatContext *s)
 {
-    int ret = 0, size, i;
+    int ret = 0, size;
     int64_t starttime = av_gettime_relative(), now;
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE;
@@ -1365,6 +1361,7 @@ static int ice_dtls_handshake(AVFormatContext *s)
     Candidate **cands = whip->candidates;
     int cands_idx = 0;
     int retries = 6;
+    struct pollfd p = { ffurl_get_file_handle(whip->udp), POLLIN, 0};
 
     if (whip->state < WHIP_STATE_UDP_OPENED || !whip->udp) {
         av_log(whip, AV_LOG_ERROR, "UDP not opened, state=%d, udp=%p\n", whip->state, whip->udp);
@@ -1422,20 +1419,19 @@ next_packet:
             goto end;
         }
 
-        /* Read the STUN or DTLS messages from peer. */
-        for (i = 0; i < ICE_DTLS_READ_MAX_RETRY; i++) {
-            if (whip->state > WHIP_STATE_ICE_CONNECTED)
-                break;
+        /* Wait for incoming STUN or DTLS messages from peer using poll(). */
+        ret = poll(&p, 1, ICE_DTLS_READ_INTERVAL);
+        if (ret > 0 && p.revents & POLLIN) {
             ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
-            if (ret > 0)
-                break;
-            if (ret == AVERROR(EAGAIN)) {
-                av_usleep(ICE_DTLS_READ_SLEEP_DURATION * WHIP_US_PER_MS);
+            if (ret <= 0)
                 continue;
-            }
-            if (is_dtls_active)
-                break;
-            av_log(whip, AV_LOG_ERROR, "Failed to read message\n");
+        } else if (!ret) {
+            if (is_dtls_active && whip->state >= WHIP_STATE_ICE_CHECKED &&
+                (whip->is_peer_ice_lite || whip->state >= WHIP_STATE_ICE_NOMINATED))
+                    goto dtls_handshake;
+            continue;
+        } else if (ret < 0) {
+            ret = AVERROR(EIO);
             goto end;
         }
 
@@ -1454,11 +1450,14 @@ next_packet:
         if (ice_is_binding_request(whip->buf, ret)) {
             if ((ret = ice_handle_binding_request(s, whip->buf, ret)) < 0)
                 goto end;
+            if (!whip->is_peer_ice_lite && whip->state >= WHIP_STATE_ICE_NOMINATED)
+                goto dtls_handshake;
             goto next_packet;
         }
 
         /* Handle DTLS handshake */
-        if (ff_is_dtls_packet(whip->buf, ret) || is_dtls_active) {
+dtls_handshake:
+        if (ff_is_dtls_packet(whip->buf, ret) || (is_dtls_active && whip->state >= WHIP_STATE_ICE_CHECKED)) {
             whip->whip_ice_time = av_gettime_relative();
             /* Start consent timer when ICE selected */
             whip->whip_last_consent_tx_time = whip->whip_last_consent_rx_time = whip->whip_ice_time;
