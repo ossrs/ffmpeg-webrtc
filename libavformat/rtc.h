@@ -53,16 +53,6 @@ typedef struct RTCICEContext {
     uint64_t tie_breaker;
 } RTCICEContext;
 
-typedef struct RTCSDPConnectionInfo {
-    int is_ice_lite;
-    char *ice_ufrag;
-    char *ice_pwd;
-    char *fingerprint;
-    char *candidate_protocol;
-    char *candidate_host;
-    int candidate_port;
-} RTCSDPConnectionInfo;
-
 int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
                                       uint8_t *buf, int buf_size,
                                       int *request_size);
@@ -76,23 +66,13 @@ int ff_rtc_ice_is_binding_response(const uint8_t *buf, int size);
 int ff_rtc_is_rtp_or_rtcp(const uint8_t *buf, int size);
 int ff_rtc_is_rtcp(const uint8_t *buf, int size);
 
-int ff_rtc_parse_sdp_connection_info(void *logctx, const char *sdp,
-                                     RTCSDPConnectionInfo *info);
-void ff_rtc_free_sdp_connection_info(RTCSDPConnectionInfo *info);
-
 int ff_rtc_init_certificate(void *logctx, const char *key_file,
                             const char *cert_file, char *key_buf,
                             size_t key_buf_size, char *cert_buf,
                             size_t cert_buf_size, char **fingerprint);
-int ff_rtc_dtls_open(AVFormatContext *s, URLContext **dtls_uc, URLContext *udp,
-                     const char *host, int port, int mtu,
+int ff_rtc_dtls_open(void *logctx, AVFormatContext *s, URLContext **dtls_uc,
+                     URLContext *udp, const char *host, int port, int mtu,
                      const char *cert_file, const char *key_file,
                      const char *cert_buf, const char *key_buf,
                      int is_dtls_active);
-int ff_rtc_srtp_setup_from_dtls(void *logctx, URLContext *dtls_uc,
-                                int is_dtls_active,
-                                SRTPContext **send_ctx, int nb_send_ctx,
-                                SRTPContext *recv_ctx,
-                                uint8_t *materials, size_t materials_size);
-
 #endif /* AVFORMAT_RTC_H */

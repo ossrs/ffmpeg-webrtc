@@ -24,6 +24,7 @@
 
 #include "libavutil/attributes_internal.h"
 #include "libavutil/avassert.h"
+#include "libavutil/base64.h"
 #include "libavutil/bprint.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/lfg.h"
@@ -288,7 +289,7 @@ static av_cold int dtls_initialize(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE;
 
-    return ff_rtc_dtls_open(s, &whip->dtls_uc, whip->udp,
+    return ff_rtc_dtls_open(whip, s, &whip->dtls_uc, whip->udp,
                             whip->ice_host, whip->ice_port, whip->pkt_size,
                             whip->cert_file, whip->key_file,
                             whip->cert_buf, whip->key_buf, is_dtls_active);
@@ -777,7 +778,10 @@ end:
 static int parse_answer(AVFormatContext *s)
 {
     int ret = 0;
-    RTCSDPConnectionInfo info;
+    AVIOContext *pb;
+    char line[MAX_URL_SIZE];
+    const char *ptr;
+    int i;
     WHIPContext *whip = s->priv_data;
 
     if (!whip->sdp_answer || !strlen(whip->sdp_answer)) {
@@ -785,18 +789,67 @@ static int parse_answer(AVFormatContext *s)
         return AVERROR(EINVAL);
     }
 
-    ret = ff_rtc_parse_sdp_connection_info(whip, whip->sdp_answer, &info);
-    if (ret < 0)
-        return ret;
+    pb = avio_alloc_context(whip->sdp_answer, strlen(whip->sdp_answer), 0, NULL, NULL, NULL, NULL);
+    if (!pb)
+        return AVERROR(ENOMEM);
 
-    whip->is_peer_ice_lite = info.is_ice_lite;
-    whip->ice_ufrag_remote = info.ice_ufrag;
-    whip->ice_pwd_remote = info.ice_pwd;
-    whip->remote_fingerprint = info.fingerprint;
-    whip->ice_protocol = info.candidate_protocol;
-    whip->ice_host = info.candidate_host;
-    whip->ice_port = info.candidate_port;
-    memset(&info, 0, sizeof(info));
+    for (i = 0; !avio_feof(pb); i++) {
+        ff_get_chomp_line(pb, line, sizeof(line));
+        if (av_strstart(line, "a=ice-lite", &ptr))
+            whip->is_peer_ice_lite = 1;
+        if (av_strstart(line, "a=ice-ufrag:", &ptr) && !whip->ice_ufrag_remote) {
+            whip->ice_ufrag_remote = av_strdup(ptr);
+            if (!whip->ice_ufrag_remote) {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+        } else if (av_strstart(line, "a=ice-pwd:", &ptr) && !whip->ice_pwd_remote) {
+            whip->ice_pwd_remote = av_strdup(ptr);
+            if (!whip->ice_pwd_remote) {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+        } else if (av_strstart(line, "a=fingerprint:", &ptr) && !whip->remote_fingerprint) {
+            /* SDP a=fingerprint format is "<algo> <hex:hex:...>". Skip
+             * the algo token, store the hex string for post-handshake compare. */
+            const char *space = strchr(ptr, ' ');
+            if (space) {
+                whip->remote_fingerprint = av_strdup(space + 1);
+                if (!whip->remote_fingerprint) {
+                    ret = AVERROR(ENOMEM);
+                    goto end;
+                }
+            }
+        } else if (av_strstart(line, "a=candidate:", &ptr) && !whip->ice_protocol) {
+            if (ptr && av_stristr(ptr, "host")) {
+                /* Refer to RFC 5245 15.1 */
+                char foundation[33], protocol[17], host[129];
+                int component_id, priority, port;
+                ret = sscanf(ptr, "%32s %d %16s %d %128s %d typ host", foundation, &component_id, protocol, &priority, host, &port);
+                if (ret != 6) {
+                    av_log(whip, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s\n",
+                        ret, i, line, whip->sdp_answer);
+                    ret = AVERROR(EIO);
+                    goto end;
+                }
+
+                if (av_strcasecmp(protocol, "udp")) {
+                    av_log(whip, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp, line %d %s of %s\n",
+                        protocol, i, line, whip->sdp_answer);
+                    ret = AVERROR(EIO);
+                    goto end;
+                }
+
+                whip->ice_protocol = av_strdup(protocol);
+                whip->ice_host = av_strdup(host);
+                whip->ice_port = port;
+                if (!whip->ice_protocol || !whip->ice_host) {
+                    ret = AVERROR(ENOMEM);
+                    goto end;
+                }
+            }
+        }
+    }
 
     if (!whip->ice_pwd_remote || !strlen(whip->ice_pwd_remote)) {
         av_log(whip, AV_LOG_ERROR, "No remote ice pwd parsed from %s\n", whip->sdp_answer);
@@ -835,7 +888,7 @@ static int parse_answer(AVFormatContext *s)
         whip->ice_protocol, whip->ice_host, whip->ice_port, ELAPSED(whip->whip_starttime, av_gettime_relative()));
 
 end:
-    ff_rtc_free_sdp_connection_info(&info);
+    avio_context_free(&pb);
     return ret;
 }
 
@@ -1102,29 +1155,88 @@ end:
 static int setup_srtp(AVFormatContext *s)
 {
     int ret;
+    char recv_key[RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN];
+    char send_key[RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN];
+    char buf[AV_BASE64_SIZE(RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN)];
+    /**
+     * The profile for OpenSSL's SRTP is SRTP_AES128_CM_SHA1_80, see ssl/d1_srtp.c.
+     * The profile for FFmpeg's SRTP is SRTP_AES128_CM_HMAC_SHA1_80, see libavformat/srtp.c.
+     */
+    const char* suite = "SRTP_AES128_CM_HMAC_SHA1_80";
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE;
-    SRTPContext *send_ctx[] = {
-        &whip->srtp_audio_send,
-        &whip->srtp_video_send,
-        &whip->srtp_video_rtx_send,
-        &whip->srtp_rtcp_send,
-    };
+    char *cp = is_dtls_active ? send_key : recv_key;
+    char *sp = is_dtls_active ? recv_key : send_key;
 
-    ret = ff_rtc_srtp_setup_from_dtls(whip, whip->dtls_uc, is_dtls_active,
-                                      send_ctx, FF_ARRAY_ELEMS(send_ctx),
-                                      &whip->srtp_recv,
-                                      whip->dtls_srtp_materials,
-                                      sizeof(whip->dtls_srtp_materials));
+    ret = ff_dtls_export_materials(whip->dtls_uc, whip->dtls_srtp_materials, sizeof(whip->dtls_srtp_materials));
     if (ret < 0)
         goto end;
+    /**
+     * This represents the material used to build the SRTP master key. It is
+     * generated by DTLS and has the following layout:
+     *          16B         16B         14B             14B
+     *      client_key | server_key | client_salt | server_salt
+     */
+    char *client_key = whip->dtls_srtp_materials;
+    char *server_key = whip->dtls_srtp_materials + RTC_DTLS_SRTP_KEY_LEN;
+    char *client_salt = server_key + RTC_DTLS_SRTP_KEY_LEN;
+    char *server_salt = client_salt + RTC_DTLS_SRTP_SALT_LEN;
+
+    memcpy(cp, client_key, RTC_DTLS_SRTP_KEY_LEN);
+    memcpy(cp + RTC_DTLS_SRTP_KEY_LEN, client_salt, RTC_DTLS_SRTP_SALT_LEN);
+
+    memcpy(sp, server_key, RTC_DTLS_SRTP_KEY_LEN);
+    memcpy(sp + RTC_DTLS_SRTP_KEY_LEN, server_salt, RTC_DTLS_SRTP_SALT_LEN);
+
+    /* Setup SRTP context for outgoing packets */
+    if (!av_base64_encode(buf, sizeof(buf), send_key, sizeof(send_key))) {
+        av_log(whip, AV_LOG_ERROR, "Failed to encode send key\n");
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&whip->srtp_audio_send, suite, buf);
+    if (ret < 0) {
+        av_log(whip, AV_LOG_ERROR, "Failed to set crypto for audio send\n");
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&whip->srtp_video_send, suite, buf);
+    if (ret < 0) {
+        av_log(whip, AV_LOG_ERROR, "Failed to set crypto for video send\n");
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&whip->srtp_video_rtx_send, suite, buf);
+    if (ret < 0) {
+        av_log(whip, AV_LOG_ERROR, "Failed to set crypto for video rtx send\n");
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&whip->srtp_rtcp_send, suite, buf);
+    if (ret < 0) {
+        av_log(whip, AV_LOG_ERROR, "Failed to set crypto for rtcp send\n");
+        goto end;
+    }
+
+    /* Setup SRTP context for incoming packets */
+    if (!av_base64_encode(buf, sizeof(buf), recv_key, sizeof(recv_key))) {
+        av_log(whip, AV_LOG_ERROR, "Failed to encode recv key\n");
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&whip->srtp_recv, suite, buf);
+    if (ret < 0) {
+        av_log(whip, AV_LOG_ERROR, "Failed to set crypto for recv\n");
+        goto end;
+    }
 
     if (whip->state < WHIP_STATE_SRTP_FINISHED)
         whip->state = WHIP_STATE_SRTP_FINISHED;
     whip->whip_srtp_time = av_gettime_relative();
     av_log(whip, AV_LOG_VERBOSE, "SRTP setup done, state=%d, suite=%s, key=%zuB, elapsed=%.2fms\n",
-        whip->state, "SRTP_AES128_CM_HMAC_SHA1_80", (size_t)(RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN),
-        ELAPSED(whip->whip_starttime, av_gettime_relative()));
+        whip->state, suite, sizeof(send_key), ELAPSED(whip->whip_starttime, av_gettime_relative()));
 
 end:
     return ret;
