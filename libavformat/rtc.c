@@ -64,7 +64,7 @@ enum STUNAttr {
  * @param request_size Pointer to an integer that receives the size of the request packet
  * @return Returns 0 if successful or AVERROR_xxx if an error occurs.
  */
-int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
+int ff_rtc_ice_create_binding_request(RTCContext *rtc,
                                       uint8_t *buf, int buf_size,
                                       int *request_size)
 {
@@ -87,15 +87,15 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
     avio_wb16(pb, 0x0001); /* STUN binding request */
     avio_wb16(pb, 0);      /* length */
     avio_wb32(pb, STUN_MAGIC_COOKIE); /* magic cookie */
-    avio_wb32(pb, av_lfg_get(ice->rnd)); /* transaction ID */
-    avio_wb32(pb, av_lfg_get(ice->rnd)); /* transaction ID */
-    avio_wb32(pb, av_lfg_get(ice->rnd)); /* transaction ID */
+    avio_wb32(pb, av_lfg_get(&rtc->rnd)); /* transaction ID */
+    avio_wb32(pb, av_lfg_get(&rtc->rnd)); /* transaction ID */
+    avio_wb32(pb, av_lfg_get(&rtc->rnd)); /* transaction ID */
 
     /* The username is the concatenation of the two ICE ufrag */
-    ret = snprintf(username, sizeof(username), "%s:%s", ice->remote_ufrag, ice->local_ufrag);
+    ret = snprintf(username, sizeof(username), "%s:%s", rtc->ice_ufrag_remote, rtc->ice_ufrag_local);
     if (ret <= 0 || ret >= sizeof(username)) {
-        av_log(logctx, AV_LOG_ERROR, "Failed to build username %s:%s, max=%zu, ret=%d\n",
-            ice->remote_ufrag, ice->local_ufrag, sizeof(username), ret);
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to build username %s:%s, max=%zu, ret=%d\n",
+            rtc->ice_ufrag_remote, rtc->ice_ufrag_local, sizeof(username), ret);
         ret = AVERROR(EIO);
         goto end;
     }
@@ -116,7 +116,7 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
 
     avio_wb16(pb, STUN_ATTR_ICE_CONTROLLING);
     avio_wb16(pb, 8);
-    avio_wb64(pb, ice->tie_breaker);
+    avio_wb64(pb, rtc->ice_tie_breaker);
 
     /* Build and update message integrity */
     avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
@@ -125,7 +125,7 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
     size = avio_tell(pb);
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
-    av_hmac_init(hmac, ice->remote_pwd, strlen(ice->remote_pwd));
+    av_hmac_init(hmac, rtc->ice_pwd_remote, strlen(rtc->ice_pwd_remote));
     av_hmac_update(hmac, buf, size - 24);
     av_hmac_final(hmac, buf + size - 20, 20);
 
@@ -163,7 +163,7 @@ end:
  * @param response_size Pointer to an integer that will store the size of the generated response.
  * @return Returns 0 if successful or AVERROR_xxx if an error occurs.
  */
-int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
+int ff_rtc_ice_create_binding_response(RTCContext *rtc,
                                        char *tid, int tid_size,
                                        uint8_t *buf, int buf_size,
                                        int *response_size)
@@ -173,7 +173,7 @@ int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
     AVHMAC *hmac = NULL;
 
     if (tid_size != 12) {
-        av_log(logctx, AV_LOG_ERROR, "Invalid transaction ID size. Expected 12, got %d\n", tid_size);
+        av_log(rtc->ctx, AV_LOG_ERROR, "Invalid transaction ID size. Expected 12, got %d\n", tid_size);
         return AVERROR(EINVAL);
     }
 
@@ -200,7 +200,7 @@ int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
     size = avio_tell(pb);
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
-    av_hmac_init(hmac, ice->local_pwd, strlen(ice->local_pwd));
+    av_hmac_init(hmac, rtc->ice_pwd_local, strlen(rtc->ice_pwd_local));
     av_hmac_update(hmac, buf, size - 24);
     av_hmac_final(hmac, buf + size - 20, 20);
 
