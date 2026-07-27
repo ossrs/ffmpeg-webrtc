@@ -30,9 +30,17 @@
 #include "rtc.h"
 #include "tls.h"
 
+/* The magic cookie for Session Traversal Utilities for NAT (STUN) messages. */
 #define STUN_MAGIC_COOKIE 0x2112A442
+
+/**
+ * Refer to RFC 8445 5.1.2
+ * priority = (2^24)*(type preference) + (2^8)*(local preference) + (2^0)*(256 - component ID)
+ * host candidate priority is 126 << 24 | 65535 << 8 | 255
+ */
 #define STUN_HOST_CANDIDATE_PRIORITY (126 << 24 | 65535 << 8 | 255)
 
+/* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
 enum STUNAttr {
     STUN_ATTR_USERNAME          = 0x0006,
     STUN_ATTR_PRIORITY          = 0x0024,
@@ -42,6 +50,19 @@ enum STUNAttr {
     STUN_ATTR_ICE_CONTROLLING   = 0x802A,
 };
 
+/**
+ * Creates and marshals an ICE binding request packet.
+ *
+ * This function creates and marshals an ICE binding request packet. The function only
+ * generates the username attribute and does not include goog-network-info,
+ * use-candidate. However, some of these attributes may be added in the future.
+ *
+ * @param s Pointer to the AVFormatContext
+ * @param buf Pointer to memory buffer to store the request packet
+ * @param buf_size Size of the memory buffer
+ * @param request_size Pointer to an integer that receives the size of the request packet
+ * @return Returns 0 if successful or AVERROR_xxx if an error occurs.
+ */
 int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
                                       uint8_t *buf, int buf_size,
                                       int *request_size)
@@ -61,13 +82,15 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
         goto end;
     }
 
-    avio_wb16(pb, 0x0001);
-    avio_wb16(pb, 0);
-    avio_wb32(pb, STUN_MAGIC_COOKIE);
-    avio_wb32(pb, av_lfg_get(ice->rnd));
-    avio_wb32(pb, av_lfg_get(ice->rnd));
-    avio_wb32(pb, av_lfg_get(ice->rnd));
+    /* Write 20 bytes header */
+    avio_wb16(pb, 0x0001); /* STUN binding request */
+    avio_wb16(pb, 0);      /* length */
+    avio_wb32(pb, STUN_MAGIC_COOKIE); /* magic cookie */
+    avio_wb32(pb, av_lfg_get(ice->rnd)); /* transaction ID */
+    avio_wb32(pb, av_lfg_get(ice->rnd)); /* transaction ID */
+    avio_wb32(pb, av_lfg_get(ice->rnd)); /* transaction ID */
 
+    /* The username is the concatenation of the two ICE ufrag */
     ret = snprintf(username, sizeof(username), "%s:%s",
                    ice->remote_ufrag, ice->local_ufrag);
     if (ret <= 0 || ret >= sizeof(username)) {
@@ -77,13 +100,15 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
         goto end;
     }
 
-    avio_wb16(pb, STUN_ATTR_USERNAME);
-    avio_wb16(pb, ret);
-    avio_write(pb, username, ret);
-    ffio_fill(pb, 0, (4 - (ret % 4)) % 4);
+    /* Write the username attribute */
+    avio_wb16(pb, STUN_ATTR_USERNAME); /* attribute type username */
+    avio_wb16(pb, ret); /* size of username */
+    avio_write(pb, username, ret); /* bytes of username */
+    ffio_fill(pb, 0, (4 - (ret % 4)) % 4); /* padding */
 
-    avio_wb16(pb, STUN_ATTR_USE_CANDIDATE);
-    avio_wb16(pb, 0);
+    /* Write the use-candidate attribute */
+    avio_wb16(pb, STUN_ATTR_USE_CANDIDATE); /* attribute type use-candidate */
+    avio_wb16(pb, 0); /* size of use-candidate */
 
     avio_wb16(pb, STUN_ATTR_PRIORITY);
     avio_wb16(pb, 4);
@@ -93,9 +118,10 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
     avio_wb16(pb, 8);
     avio_wb64(pb, ice->tie_breaker);
 
-    avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY);
-    avio_wb16(pb, 20);
-    ffio_fill(pb, 0, 20);
+    /* Build and update message integrity */
+    avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
+    avio_wb16(pb, 20); /* size of message integrity */
+    ffio_fill(pb, 0, 20); /* fill with zero to directly write and skip it */
     size = avio_tell(pb);
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
@@ -103,12 +129,14 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
     av_hmac_update(hmac, buf, size - 24);
     av_hmac_final(hmac, buf + size - 20, 20);
 
-    avio_wb16(pb, STUN_ATTR_FINGERPRINT);
-    avio_wb16(pb, 4);
-    ffio_fill(pb, 0, 4);
+    /* Write the fingerprint attribute */
+    avio_wb16(pb, STUN_ATTR_FINGERPRINT); /* attribute type fingerprint */
+    avio_wb16(pb, 4); /* size of fingerprint */
+    ffio_fill(pb, 0, 4); /* fill with zero to directly write and skip it */
     size = avio_tell(pb);
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
+    /* Refer to the av_hash_alloc("CRC32"), av_hash_init and av_hash_final */
     crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF,
                    buf, size - 8) ^ 0xFFFFFFFF;
     avio_skip(pb, -4);
@@ -122,6 +150,20 @@ end:
     return ret;
 }
 
+/**
+ * Create an ICE binding response.
+ *
+ * This function generates an ICE binding response and writes it to the provided
+ * buffer. The response is signed using the local password for message integrity.
+ *
+ * @param s Pointer to the AVFormatContext structure.
+ * @param tid Pointer to the transaction ID of the binding request. The tid_size should be 12.
+ * @param tid_size The size of the transaction ID, should be 12.
+ * @param buf Pointer to the buffer where the response will be written.
+ * @param buf_size The size of the buffer provided for the response.
+ * @param response_size Pointer to an integer that will store the size of the generated response.
+ * @return Returns 0 if successful or AVERROR_xxx if an error occurs.
+ */
 int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
                                        const uint8_t *tid, int tid_size,
                                        uint8_t *buf, int buf_size,
@@ -147,14 +189,16 @@ int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
         goto end;
     }
 
-    avio_wb16(pb, 0x0101);
-    avio_wb16(pb, 0);
-    avio_wb32(pb, STUN_MAGIC_COOKIE);
+    /* Write 20 bytes header */
+    avio_wb16(pb, 0x0101); /* STUN binding response */
+    avio_wb16(pb, 0);      /* length */
+    avio_wb32(pb, STUN_MAGIC_COOKIE); /* magic cookie */
     avio_write(pb, tid, tid_size);
 
-    avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY);
-    avio_wb16(pb, 20);
-    ffio_fill(pb, 0, 20);
+    /* Build and update message integrity */
+    avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
+    avio_wb16(pb, 20); /* size of message integrity */
+    ffio_fill(pb, 0, 20); /* fill with zero to directly write and skip it */
     size = avio_tell(pb);
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
@@ -162,12 +206,14 @@ int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
     av_hmac_update(hmac, buf, size - 24);
     av_hmac_final(hmac, buf + size - 20, 20);
 
-    avio_wb16(pb, STUN_ATTR_FINGERPRINT);
-    avio_wb16(pb, 4);
-    ffio_fill(pb, 0, 4);
+    /* Write the fingerprint attribute */
+    avio_wb16(pb, STUN_ATTR_FINGERPRINT); /* attribute type fingerprint */
+    avio_wb16(pb, 4); /* size of fingerprint */
+    ffio_fill(pb, 0, 4); /* fill with zero to directly write and skip it */
     size = avio_tell(pb);
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
+    /* Refer to the av_hash_alloc("CRC32"), av_hash_init and av_hash_final */
     crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF,
                    buf, size - 8) ^ 0xFFFFFFFF;
     avio_skip(pb, -4);
@@ -181,27 +227,48 @@ end:
     return ret;
 }
 
+/**
+ * A Binding request has class=0b00 (request) and method=0b000000000001 (Binding)
+ * and is encoded into the first 16 bits as 0x0001.
+ * See https://datatracker.ietf.org/doc/html/rfc5389#section-6
+ */
 int ff_rtc_ice_is_binding_request(const uint8_t *buf, int size)
 {
     return size >= RTC_STUN_HEADER_SIZE && AV_RB16(buf) == 0x0001;
 }
 
+/**
+ * A Binding response has class=0b10 (success response) and method=0b000000000001,
+ * and is encoded into the first 16 bits as 0x0101.
+ */
 int ff_rtc_ice_is_binding_response(const uint8_t *buf, int size)
 {
     return size >= RTC_STUN_HEADER_SIZE && AV_RB16(buf) == 0x0101;
 }
 
+/**
+ * In RTP packets, the first byte is represented as 0b10xxxxxx, where the initial
+ * two bits (0b10) indicate the RTP version,
+ * see https://www.rfc-editor.org/rfc/rfc3550#section-5.1
+ * The RTCP packet header is similar to RTP,
+ * see https://www.rfc-editor.org/rfc/rfc3550#section-6.4.1
+ */
 int ff_rtc_is_rtp_or_rtcp(const uint8_t *buf, int size)
 {
     return size >= RTC_RTP_HEADER_SIZE && (buf[0] & 0xC0) == 0x80;
 }
 
+/* Whether the packet is RTCP. */
 int ff_rtc_is_rtcp(const uint8_t *buf, int size)
 {
     return size >= RTC_RTP_HEADER_SIZE &&
            buf[1] >= RTC_RTCP_PT_START && buf[1] <= RTC_RTCP_PT_END;
 }
 
+/**
+ * Get or Generate a self-signed certificate and private key for DTLS,
+ * fingerprint for SDP
+ */
 int ff_rtc_init_certificate(void *logctx, const char *key_file,
                             const char *cert_file, char *key_buf,
                             size_t key_buf_size, char *cert_buf,
@@ -266,6 +333,7 @@ int ff_rtc_dtls_open(void *logctx, AVFormatContext *s, URLContext **dtls_uc,
         return ret;
     }
 
+    /* reuse the udp created by whip */
     ff_tls_set_external_socket(*dtls_uc, udp);
     return 0;
 }
