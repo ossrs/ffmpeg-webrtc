@@ -19,6 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/attributes_internal.h"
 #include "libavutil/crc.h"
 #include "libavutil/hmac.h"
 #include "libavutil/intreadwrite.h"
@@ -38,7 +39,7 @@
  * priority = (2^24)*(type preference) + (2^8)*(local preference) + (2^0)*(256 - component ID)
  * host candidate priority is 126 << 24 | 65535 << 8 | 255
  */
-#define STUN_HOST_CANDIDATE_PRIORITY (126 << 24 | 65535 << 8 | 255)
+#define STUN_HOST_CANDIDATE_PRIORITY 126 << 24 | 65535 << 8 | 255
 
 /* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
 enum STUNAttr {
@@ -91,11 +92,10 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
     avio_wb32(pb, av_lfg_get(ice->rnd)); /* transaction ID */
 
     /* The username is the concatenation of the two ICE ufrag */
-    ret = snprintf(username, sizeof(username), "%s:%s",
-                   ice->remote_ufrag, ice->local_ufrag);
+    ret = snprintf(username, sizeof(username), "%s:%s", ice->remote_ufrag, ice->local_ufrag);
     if (ret <= 0 || ret >= sizeof(username)) {
         av_log(logctx, AV_LOG_ERROR, "Failed to build username %s:%s, max=%zu, ret=%d\n",
-               ice->remote_ufrag, ice->local_ufrag, sizeof(username), ret);
+            ice->remote_ufrag, ice->local_ufrag, sizeof(username), ret);
         ret = AVERROR(EIO);
         goto end;
     }
@@ -137,10 +137,9 @@ int ff_rtc_ice_create_binding_request(void *logctx, RTCICEContext *ice,
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
     /* Refer to the av_hash_alloc("CRC32"), av_hash_init and av_hash_final */
-    crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF,
-                   buf, size - 8) ^ 0xFFFFFFFF;
+    crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF, buf, size - 8) ^ 0xFFFFFFFF;
     avio_skip(pb, -4);
-    avio_wb32(pb, crc32 ^ 0x5354554E);
+    avio_wb32(pb, crc32 ^ 0x5354554E); /* xor with "STUN" */
 
     *request_size = size;
 
@@ -165,7 +164,7 @@ end:
  * @return Returns 0 if successful or AVERROR_xxx if an error occurs.
  */
 int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
-                                       const uint8_t *tid, int tid_size,
+                                       char *tid, int tid_size,
                                        uint8_t *buf, int buf_size,
                                        int *response_size)
 {
@@ -174,8 +173,7 @@ int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
     AVHMAC *hmac = NULL;
 
     if (tid_size != 12) {
-        av_log(logctx, AV_LOG_ERROR, "Invalid transaction ID size. Expected 12, got %d\n",
-               tid_size);
+        av_log(logctx, AV_LOG_ERROR, "Invalid transaction ID size. Expected 12, got %d\n", tid_size);
         return AVERROR(EINVAL);
     }
 
@@ -193,7 +191,7 @@ int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
     avio_wb16(pb, 0x0101); /* STUN binding response */
     avio_wb16(pb, 0);      /* length */
     avio_wb32(pb, STUN_MAGIC_COOKIE); /* magic cookie */
-    avio_write(pb, tid, tid_size);
+    avio_write(pb, tid, tid_size); /* transaction ID */
 
     /* Build and update message integrity */
     avio_wb16(pb, STUN_ATTR_MESSAGE_INTEGRITY); /* attribute type message integrity */
@@ -214,10 +212,9 @@ int ff_rtc_ice_create_binding_response(void *logctx, RTCICEContext *ice,
     buf[2] = (size - 20) >> 8;
     buf[3] = (size - 20) & 0xFF;
     /* Refer to the av_hash_alloc("CRC32"), av_hash_init and av_hash_final */
-    crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF,
-                   buf, size - 8) ^ 0xFFFFFFFF;
+    crc32 = av_crc(av_crc_get_table(AV_CRC_32_IEEE_LE), 0xFFFFFFFF, buf, size - 8) ^ 0xFFFFFFFF;
     avio_skip(pb, -4);
-    avio_wb32(pb, crc32 ^ 0x5354554E);
+    avio_wb32(pb, crc32 ^ 0x5354554E); /* xor with "STUN" */
 
     *response_size = size;
 
@@ -232,18 +229,18 @@ end:
  * and is encoded into the first 16 bits as 0x0001.
  * See https://datatracker.ietf.org/doc/html/rfc5389#section-6
  */
-int ff_rtc_ice_is_binding_request(const uint8_t *buf, int size)
+int ff_rtc_ice_is_binding_request(uint8_t *b, int size)
 {
-    return size >= RTC_STUN_HEADER_SIZE && AV_RB16(buf) == 0x0001;
+    return size >= RTC_STUN_HEADER_SIZE && AV_RB16(&b[0]) == 0x0001;
 }
 
 /**
  * A Binding response has class=0b10 (success response) and method=0b000000000001,
  * and is encoded into the first 16 bits as 0x0101.
  */
-int ff_rtc_ice_is_binding_response(const uint8_t *buf, int size)
+int ff_rtc_ice_is_binding_response(uint8_t *b, int size)
 {
-    return size >= RTC_STUN_HEADER_SIZE && AV_RB16(buf) == 0x0101;
+    return size >= RTC_STUN_HEADER_SIZE && AV_RB16(&b[0]) == 0x0101;
 }
 
 /**
@@ -253,87 +250,87 @@ int ff_rtc_ice_is_binding_response(const uint8_t *buf, int size)
  * The RTCP packet header is similar to RTP,
  * see https://www.rfc-editor.org/rfc/rfc3550#section-6.4.1
  */
-int ff_rtc_is_rtp_or_rtcp(const uint8_t *buf, int size)
+int ff_rtc_is_rtp_or_rtcp(const uint8_t *b, int size)
 {
-    return size >= RTC_RTP_HEADER_SIZE && (buf[0] & 0xC0) == 0x80;
+    return size >= RTC_RTP_HEADER_SIZE && (b[0] & 0xC0) == 0x80;
 }
 
 /* Whether the packet is RTCP. */
-int ff_rtc_is_rtcp(const uint8_t *buf, int size)
+int ff_rtc_is_rtcp(const uint8_t *b, int size)
 {
-    return size >= RTC_RTP_HEADER_SIZE &&
-           buf[1] >= RTC_RTCP_PT_START && buf[1] <= RTC_RTCP_PT_END;
+    return size >= RTC_RTP_HEADER_SIZE && b[1] >= RTC_RTCP_PT_START && b[1] <= RTC_RTCP_PT_END;
 }
 
 /**
  * Get or Generate a self-signed certificate and private key for DTLS,
  * fingerprint for SDP
  */
-int ff_rtc_init_certificate(void *logctx, const char *key_file,
-                            const char *cert_file, char *key_buf,
-                            size_t key_buf_size, char *cert_buf,
-                            size_t cert_buf_size, char **fingerprint)
+av_cold int ff_rtc_init_certificate(void *logctx, char *key_file,
+                                    char *cert_file, char *key_buf,
+                                    size_t key_buf_size, char *cert_buf,
+                                    size_t cert_buf_size, char **fingerprint)
 {
-    int ret;
+    int ret = 0;
 
     if (cert_file && key_file) {
-        ret = ff_ssl_read_key_cert((char *)key_file, (char *)cert_file,
-                                   key_buf, key_buf_size, cert_buf,
-                                   cert_buf_size, fingerprint);
-        if (ret < 0)
-            av_log(logctx, AV_LOG_ERROR,
-                   "Failed to read DTLS certificate from cert=%s, key=%s\n",
-                   cert_file, key_file);
+        /* Read the private key and certificate from the file. */
+        if ((ret = ff_ssl_read_key_cert(key_file, cert_file,
+                                        key_buf, key_buf_size,
+                                        cert_buf, cert_buf_size,
+                                        fingerprint)) < 0) {
+            av_log(logctx, AV_LOG_ERROR, "Failed to read DTLS certificate from cert=%s, key=%s\n",
+                cert_file, key_file);
+            return ret;
+        }
     } else {
-        ret = ff_ssl_gen_key_cert(key_buf, key_buf_size, cert_buf,
-                                  cert_buf_size, fingerprint);
-        if (ret < 0)
-            av_log(logctx, AV_LOG_ERROR,
-                   "Failed to generate DTLS private key and certificate\n");
+        /* Generate a private key to ctx->dtls_pkey and self-signed certificate. */
+        if ((ret = ff_ssl_gen_key_cert(key_buf, key_buf_size,
+                                       cert_buf, cert_buf_size,
+                                       fingerprint)) < 0) {
+            av_log(logctx, AV_LOG_ERROR, "Failed to generate DTLS private key and certificate\n");
+            return ret;
+        }
     }
 
     return ret;
 }
 
-int ff_rtc_dtls_open(void *logctx, AVFormatContext *s, URLContext **dtls_uc,
-                     URLContext *udp, const char *host, int port, int mtu,
-                     const char *cert_file, const char *key_file,
-                     const char *cert_buf, const char *key_buf,
-                     int is_dtls_active)
+av_cold int ff_rtc_dtls_open(void *logctx, AVFormatContext *s,
+                             URLContext **dtls_uc, URLContext *udp,
+                             char *ice_host, int ice_port, int pkt_size,
+                             char *cert_file, char *key_file,
+                             char *cert_buf, char *key_buf,
+                             int is_dtls_active)
 {
-    int ret;
+    int ret = 0;
     AVDictionary *opts = NULL;
-    char url[256];
+    char buf[256];
 
-    ff_url_join(url, sizeof(url), "dtls", NULL, host, port, NULL);
-    av_dict_set_int(&opts, "mtu", mtu, 0);
-    if (cert_file)
+    ff_url_join(buf, sizeof(buf), "dtls", NULL, ice_host, ice_port, NULL);
+    av_dict_set_int(&opts, "mtu", pkt_size, 0);
+    if (cert_file) {
         av_dict_set(&opts, "cert_file", cert_file, 0);
-    else
+    } else
         av_dict_set(&opts, "cert_pem", cert_buf, 0);
 
-    if (key_file)
+    if (key_file) {
         av_dict_set(&opts, "key_file", key_file, 0);
-    else
+    } else
         av_dict_set(&opts, "key_pem", key_buf, 0);
-
     av_dict_set_int(&opts, "external_sock", 1, 0);
     av_dict_set_int(&opts, "use_srtp", 1, 0);
     av_dict_set_int(&opts, "listen", is_dtls_active ? 0 : 1, 0);
     // Do not verify CA
     av_dict_set_int(&opts, "verify", 0, 0);
-
-    ret = ffurl_open_whitelist(dtls_uc, url, AVIO_FLAG_READ_WRITE,
-                               &s->interrupt_callback, &opts,
-                               s->protocol_whitelist, s->protocol_blacklist,
-                               NULL);
+    ret = ffurl_open_whitelist(dtls_uc, buf, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
+        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     av_dict_free(&opts);
     if (ret < 0) {
-        av_log(logctx, AV_LOG_ERROR, "Failed to open DTLS url:%s\n", url);
-        return ret;
+        av_log(logctx, AV_LOG_ERROR, "Failed to open DTLS url:%s\n", buf);
+        goto end;
     }
-
     /* reuse the udp created by whip */
     ff_tls_set_external_socket(*dtls_uc, udp);
-    return 0;
+end:
+    return ret;
 }

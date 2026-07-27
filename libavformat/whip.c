@@ -226,7 +226,7 @@ typedef struct WHIPContext {
      *          16B         16B         14B             14B
      *      client_key | server_key | client_salt | server_salt
      */
-    uint8_t dtls_srtp_materials[RTC_DTLS_SRTP_MATERIALS_LEN];
+    uint8_t dtls_srtp_materials[(RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN) * 2];
 
     /* TODO: Use AVIOContext instead of URLContext */
     URLContext *dtls_uc;
