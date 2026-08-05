@@ -20,6 +20,7 @@
  */
 
 #include "libavutil/bprint.h"
+#include "libavutil/internal.h"
 #include "libavutil/lfg.h"
 #include "libavutil/opt.h"
 #include "libavutil/mem.h"
@@ -27,6 +28,7 @@
 #include "libavutil/time.h"
 
 #include "avio_internal.h"
+#include "demux.h"
 #include "http.h"
 #include "internal.h"
 #include "rtc.h"
@@ -419,6 +421,36 @@ end:
     return ret;
 }
 
+static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
+{
+    /* RTP receive/depacketization is not implemented yet; deferred to a
+     * follow-up patch. */
+    return AVERROR(ENOSYS);
+}
+
+static av_cold int whep_init(AVFormatContext *s)
+{
+    int ret;
+    WHEPContext *whep = s->priv_data;
+
+    if ((ret = initialize(s)) < 0)
+        goto end;
+
+    if ((ret = generate_sdp_offer(s)) < 0)
+        goto end;
+
+    if ((ret = exchange_sdp(s)) < 0)
+        goto end;
+
+    if ((ret = parse_answer(s)) < 0)
+        goto end;
+
+end:
+    if (ret < 0)
+        whep->state = WHEP_STATE_FAILED;
+    return ret;
+}
+
 #define OFFSET(x) offsetof(WHEPContext, x)
 #define DEC AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
@@ -434,4 +466,14 @@ static const AVClass whep_demuxer_class = {
     .item_name  = av_default_item_name,
     .option     = options,
     .version    = LIBAVUTIL_VERSION_INT,
+};
+
+const FFInputFormat ff_whep_demuxer = {
+    .p.name         = "whep",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("WHEP(WebRTC-HTTP egress protocol) demuxer"),
+    .p.flags        = AVFMT_NOFILE | AVFMT_EXPERIMENTAL,
+    .p.priv_class   = &whep_demuxer_class,
+    .priv_data_size = sizeof(WHEPContext),
+    .read_header    = whep_init,
+    .read_packet    = whep_read_packet,
 };
