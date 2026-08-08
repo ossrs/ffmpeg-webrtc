@@ -104,6 +104,15 @@ typedef struct RTCContext {
     char *ice_protocol;
     char *ice_host;
     int ice_port;
+
+    /* The UDP transport is used for delivering ICE, DTLS and SRTP packets. */
+    URLContext *udp;
+    /**
+     * The size of RTP packet, should generally be set to MTU.
+     * Note that pion requires a smaller value, for example, 1200.
+     */
+    int pkt_size;
+    int ts_buffer_size;/* Underlying protocol send/receive buffer size */
 } RTCContext;
 
 int ff_rtc_ice_create_binding_request(RTCContext *rtc,
@@ -128,4 +137,5 @@ int ff_rtc_dtls_open(void *logctx, AVFormatContext *s, URLContext **dtls_uc,
                      char *cert_file, char *key_file,
                      char *cert_buf, char *key_buf,
                      int is_dtls_active);
+int ff_rtc_udp_connect(void *logctx, RTCContext *rtc);
 #endif /* AVFORMAT_RTC_H */

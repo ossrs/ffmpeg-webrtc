@@ -220,8 +220,6 @@ typedef struct WHIPContext {
     /* The SRTP receive context, to decrypt incoming packets. */
     SRTPContext srtp_recv;
 
-    /* The UDP transport is used for delivering ICE, DTLS and SRTP packets. */
-    URLContext *udp;
     /* The buffer for UDP transmission. */
     char buf[MAX_UDP_BUFFER_SIZE];
 
@@ -230,12 +228,6 @@ typedef struct WHIPContext {
 
     /* The timeout in microseconds for HTTP operations. */
     int64_t timeout;
-    /**
-     * The size of RTP packet, should generally be set to MTU.
-     * Note that pion requires a smaller value, for example, 1200.
-     */
-    int pkt_size;
-    int ts_buffer_size;/* Underlying protocol send/receive buffer size */
     /**
      * The optional Bearer token for WHIP Authorization.
      * See https://www.ietf.org/archive/id/draft-ietf-wish-whip-08.html#name-authentication-and-authoriz
@@ -270,8 +262,8 @@ static av_cold int dtls_initialize(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE;
 
-    return ff_rtc_dtls_open(whip, s, &whip->dtls_uc, whip->udp,
-                            whip->rtc.ice_host, whip->rtc.ice_port, whip->pkt_size,
+    return ff_rtc_dtls_open(whip, s, &whip->dtls_uc, whip->rtc.udp,
+                            whip->rtc.ice_host, whip->rtc.ice_port, whip->rtc.pkt_size,
                             whip->cert_file, whip->key_file,
                             whip->cert_buf, whip->key_buf, is_dtls_active);
 }
@@ -308,26 +300,26 @@ static av_cold int initialize(AVFormatContext *s)
     whip->audio_first_seq = av_lfg_get(&whip->rtc.rnd) & 0x0fff;
     whip->video_first_seq = whip->audio_first_seq + 1;
 
-    if (whip->pkt_size < ideal_pkt_size)
+    if (whip->rtc.pkt_size < ideal_pkt_size)
         av_log(whip, AV_LOG_WARNING, "pkt_size=%d(<%d) is too small, may cause packet loss\n",
-               whip->pkt_size, ideal_pkt_size);
+               whip->rtc.pkt_size, ideal_pkt_size);
 
     whip->hist = av_calloc(whip->hist_sz, sizeof(*whip->hist));
     if (!whip->hist)
         return AVERROR(ENOMEM);
 
-    whip->hist_pool = av_calloc(whip->hist_sz, whip->pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN);
+    whip->hist_pool = av_calloc(whip->hist_sz, whip->rtc.pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN);
     if (!whip->hist_pool)
         return AVERROR(ENOMEM);
 
     for (int i = 0; i < whip->hist_sz; i++)
-        whip->hist[i].buf = whip->hist_pool + i * (whip->pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN);
+        whip->hist[i].buf = whip->hist_pool + i * (whip->rtc.pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN);
 
     if (whip->state < WHIP_STATE_INIT)
         whip->state = WHIP_STATE_INIT;
     whip->whip_init_time = av_gettime_relative();
     av_log(whip, AV_LOG_VERBOSE, "Init state=%d, handshake_timeout=%dms, pkt_size=%d, seed=%d, elapsed=%.2fms\n",
-        whip->state, whip->handshake_timeout, whip->pkt_size, seed, ELAPSED(whip->whip_starttime, av_gettime_relative()));
+        whip->state, whip->handshake_timeout, whip->rtc.pkt_size, seed, ELAPSED(whip->whip_starttime, av_gettime_relative()));
 
     return 0;
 }
@@ -905,7 +897,7 @@ static int ice_handle_binding_request(AVFormatContext *s, char *buf, int buf_siz
         return ret;
     }
 
-    ret = ffurl_write(whip->udp, whip->buf, size);
+    ret = ffurl_write(whip->rtc.udp, whip->buf, size);
     if (ret < 0) {
         av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding response, size=%d\n", size);
         return ret;
@@ -922,30 +914,15 @@ static int ice_handle_binding_request(AVFormatContext *s, char *buf, int buf_siz
 static int udp_connect(AVFormatContext *s)
 {
     int ret = 0;
-    char url[256];
-    AVDictionary *opts = NULL;
+    // char url[256];
+    // AVDictionary *opts = NULL;
     WHIPContext *whip = s->priv_data;
 
-    /* Build UDP URL and create the UDP context as transport. */
-    ff_url_join(url, sizeof(url), "udp", NULL, whip->rtc.ice_host, whip->rtc.ice_port, NULL);
-
-    av_dict_set_int(&opts, "connect", 1, 0);
-    av_dict_set_int(&opts, "fifo_size", 0, 0);
-    /* Pass through the pkt_size and buffer_size to underling protocol */
-    av_dict_set_int(&opts, "pkt_size", whip->pkt_size, 0);
-    av_dict_set_int(&opts, "buffer_size", whip->ts_buffer_size, 0);
-
-    ret = ffurl_open_whitelist(&whip->udp, url, AVIO_FLAG_WRITE, &s->interrupt_callback,
-        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
+    ret = ff_rtc_udp_connect(whip, &(whip->rtc));
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", whip->rtc.ice_host, whip->rtc.ice_port);
+        av_log(whip, AV_LOG_ERROR, "udp failed!");
         goto end;
     }
-
-    /* Make the socket non-blocking, set to READ and WRITE mode after connected */
-    ff_socket_nonblock(ffurl_get_file_handle(whip->udp), 1);
-    whip->udp->flags |= AVIO_FLAG_READ | AVIO_FLAG_NONBLOCK;
-
     if (whip->state < WHIP_STATE_UDP_CONNECTED)
         whip->state = WHIP_STATE_UDP_CONNECTED;
     whip->whip_udp_time = av_gettime_relative();
@@ -953,7 +930,6 @@ static int udp_connect(AVFormatContext *s)
         whip->state, ELAPSED(whip->whip_starttime, av_gettime_relative()), whip->rtc.ice_host, whip->rtc.ice_port);
 
 end:
-    av_dict_free(&opts);
     return ret;
 }
 
@@ -964,8 +940,8 @@ static int ice_dtls_handshake(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE;
 
-    if (whip->state < WHIP_STATE_UDP_CONNECTED || !whip->udp) {
-        av_log(whip, AV_LOG_ERROR, "UDP not connected, state=%d, udp=%p\n", whip->state, whip->udp);
+    if (whip->state < WHIP_STATE_UDP_CONNECTED || !whip->rtc.udp) {
+        av_log(whip, AV_LOG_ERROR, "UDP not connected, state=%d, udp=%p\n", whip->state, whip->rtc.udp);
         return AVERROR(EINVAL);
     }
 
@@ -979,7 +955,7 @@ static int ice_dtls_handshake(AVFormatContext *s)
                 goto end;
             }
 
-            ret = ffurl_write(whip->udp, whip->buf, size);
+            ret = ffurl_write(whip->rtc.udp, whip->buf, size);
             if (ret < 0) {
                 av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
                 goto end;
@@ -1006,7 +982,7 @@ next_packet:
         for (i = 0; i < ICE_DTLS_READ_MAX_RETRY; i++) {
             if (whip->state > WHIP_STATE_ICE_CONNECTED)
                 break;
-            ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
+            ret = ffurl_read(whip->rtc.udp, whip->buf, sizeof(whip->buf));
             if (ret > 0)
                 break;
             if (ret == AVERROR(EAGAIN)) {
@@ -1172,7 +1148,7 @@ static int rtp_history_store(WHIPContext *whip, const uint8_t *buf, int size)
     uint16_t seq = AV_RB16(buf + 2);
     uint32_t pos = ((uint32_t)seq - (uint32_t)whip->video_first_seq) % (uint32_t)whip->hist_sz;
     RtpHistoryItem *it = &whip->hist[pos];
-    if (size > whip->pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN)
+    if (size > whip->rtc.pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN)
         return AVERROR_INVALIDDATA;
     memcpy(it->buf, buf, size);
     it->size = size;
@@ -1231,7 +1207,7 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
             return ret;
     }
 
-    ret = ffurl_write(whip->udp, whip->buf, cipher_size);
+    ret = ffurl_write(whip->rtc.udp, whip->buf, cipher_size);
     if (ret < 0) {
         av_log(whip, AV_LOG_ERROR, "Failed to write packet=%dB, ret=%d\n", cipher_size, ret);
         return ret;
@@ -1258,13 +1234,13 @@ static int create_rtp_muxer(AVFormatContext *s)
     AVDictionary *opts = NULL;
     uint8_t *buffer = NULL;
     WHIPContext *whip = s->priv_data;
-    whip->udp->flags |= AVIO_FLAG_NONBLOCK;
+    whip->rtc.udp->flags |= AVIO_FLAG_NONBLOCK;
 
 
     /* The UDP buffer size, may greater than MTU. */
     buffer_size = MAX_UDP_BUFFER_SIZE;
     /* The RTP payload max size. Reserved some bytes for SRTP checksum and padding. */
-    max_packet_size = whip->pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN;
+    max_packet_size = whip->rtc.pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN;
 
     for (i = 0; i < s->nb_streams; i++) {
         rtp_ctx = avformat_alloc_context();
@@ -1600,7 +1576,7 @@ static void handle_rtx_packet(AVFormatContext *s, uint16_t seq)
                rtx_size, cipher_size);
         goto end;
     }
-    ret = ffurl_write(whip->udp, whip->buf, cipher_size);
+    ret = ffurl_write(whip->rtc.udp, whip->buf, cipher_size);
 end:
     if (ret < 0)
         av_log(whip, AV_LOG_WARNING, "Failed to send RTX packet, skip this one\n");
@@ -1691,7 +1667,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
             av_log(whip, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
             goto end;
         }
-        ret = ffurl_write(whip->udp, whip->buf, size);
+        ret = ffurl_write(whip->rtc.udp, whip->buf, size);
         if (ret < 0) {
             av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
             goto end;
@@ -1704,7 +1680,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
      * Receive packets from the server such as ICE binding requests, DTLS messages,
      * and RTCP like PLI requests, then respond to them.
      */
-    ret = ffurl_read(whip->udp, whip->buf, sizeof(whip->buf));
+    ret = ffurl_read(whip->rtc.udp, whip->buf, sizeof(whip->buf));
     if (ret < 0) {
         if (ret == AVERROR(EAGAIN))
             goto write_packet;
@@ -1816,7 +1792,7 @@ static av_cold void whip_deinit(AVFormatContext *s)
     ff_srtp_free(&whip->srtp_rtcp_send);
     ff_srtp_free(&whip->srtp_recv);
     ffurl_closep(&whip->dtls_uc);
-    ffurl_closep(&whip->udp);
+    ffurl_closep(&whip->rtc.udp);
     av_freep(&whip->dtls_fingerprint);
     av_freep(&whip->remote_fingerprint);
 }
@@ -1845,8 +1821,8 @@ static int whip_check_bitstream(AVFormatContext *s, AVStream *st, const AVPacket
 static const AVOption options[] = {
     { "handshake_timeout",  "Timeout in milliseconds for ICE and DTLS handshake.",      OFFSET(handshake_timeout),  AV_OPT_TYPE_INT,    { .i64 = 5000 },    -1, INT_MAX, ENC },
     { "timeout",            "Set timeout for socket I/O operations",                    OFFSET(timeout),            AV_OPT_TYPE_DURATION, { .i64 = -1 }, -1, INT_MAX, ENC },
-    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, ENC },
-    { "ts_buffer_size",     "The buffer size, in bytes, of underlying protocol",        OFFSET(ts_buffer_size),        AV_OPT_TYPE_INT,    { .i64 = -1 },      -1, INT_MAX, ENC },
+    { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", OFFSET(rtc.pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, ENC },
+    { "ts_buffer_size",     "The buffer size, in bytes, of underlying protocol",        OFFSET(rtc.ts_buffer_size),        AV_OPT_TYPE_INT,    { .i64 = -1 },      -1, INT_MAX, ENC },
     { "whip_flags",         "Set flags affecting WHIP connection behavior",             OFFSET(flags),              AV_OPT_TYPE_FLAGS,  { .i64 = 0},         0, UINT_MAX, ENC, .unit = "flags" },
     { "dtls_active",        "Set dtls role as active",                                  0,                          AV_OPT_TYPE_CONST,  { .i64 = WHIP_DTLS_ACTIVE}, 0, UINT_MAX, ENC, .unit = "flags" },
     { "rtp_history",        "The number of RTP history items to store",                 OFFSET(hist_sz),            AV_OPT_TYPE_INT,    { .i64 = WHIP_RTP_HISTORY_DEFAULT }, WHIP_RTP_HISTORY_MIN, WHIP_RTP_HISTORY_MAX, ENC },

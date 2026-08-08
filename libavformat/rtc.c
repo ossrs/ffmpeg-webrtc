@@ -334,3 +334,33 @@ av_cold int ff_rtc_dtls_open(void *logctx, AVFormatContext *s,
 end:
     return ret;
 }
+
+int ff_rtc_udp_connect(void *logctx, RTCContext *rtc)
+{
+    int ret = 0;
+    char url[256];
+    AVDictionary *opts = NULL;
+
+    /* Build UDP URL and create the UDP context as transport. */
+    ff_url_join(url, sizeof(url), "udp", NULL, rtc->ice_host, rtc->ice_port, NULL);
+
+    av_dict_set_int(&opts, "connect", 1, 0);
+    av_dict_set_int(&opts, "fifo_size", 0, 0);
+    /* Pass through the pkt_size and buffer_size to underling protocol */
+    av_dict_set_int(&opts, "pkt_size", rtc->pkt_size, 0);
+    av_dict_set_int(&opts, "buffer_size", rtc->ts_buffer_size, 0);
+
+    ret = ffurl_open_whitelist(&rtc->udp, url, AVIO_FLAG_WRITE, &rtc->ctx->interrupt_callback,
+        &opts, rtc->ctx->protocol_whitelist, rtc->ctx->protocol_blacklist, NULL);
+    if (ret < 0) {
+        av_log(logctx, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", rtc->ice_host, rtc->ice_port);
+        goto end;
+    }
+
+    /* Make the socket non-blocking, set to READ and WRITE mode after connected */
+    ff_socket_nonblock(ffurl_get_file_handle(rtc->udp), 1);
+    rtc->udp->flags |= AVIO_FLAG_READ | AVIO_FLAG_NONBLOCK;
+end:
+    av_dict_free(&opts);
+    return ret;
+}
