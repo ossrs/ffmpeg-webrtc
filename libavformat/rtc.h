@@ -101,9 +101,26 @@ typedef struct RTCContext {
      * Currently, we only support one candidate and choose the first UDP candidate.
      * However, we plan to support multiple candidates in the future.
      */
+
+    /* TODO: Use AVIOContext instead of URLContext */
+    URLContext *dtls_uc;
+
     char *ice_protocol;
     char *ice_host;
     int ice_port;
+
+    /* The fingerprint of certificate, used in SDP offer. */
+    char *dtls_fingerprint;
+    /* remote DTLS cert fingerprint from SDP answer (sha-256). */
+    char *remote_fingerprint;
+
+    /* The certificate and private key content used for DTLS handshake */
+    char cert_buf[MAX_CERTIFICATE_SIZE];
+    char key_buf[MAX_CERTIFICATE_SIZE];
+
+    /* The certificate and private key used for DTLS handshake. */
+    char* cert_file;
+    char* key_file;
 
     /* The UDP transport is used for delivering ICE, DTLS and SRTP packets. */
     URLContext *udp;
@@ -128,14 +145,7 @@ int ff_rtc_ice_is_binding_response(uint8_t *b, int size);
 int ff_rtc_is_rtp_or_rtcp(const uint8_t *b, int size);
 int ff_rtc_is_rtcp(const uint8_t *b, int size);
 
-int ff_rtc_init_certificate(void *logctx, char *key_file,
-                            char *cert_file, char *key_buf,
-                            size_t key_buf_size, char *cert_buf,
-                            size_t cert_buf_size, char **fingerprint);
-int ff_rtc_dtls_open(void *logctx, AVFormatContext *s, URLContext **dtls_uc,
-                     URLContext *udp, char *ice_host, int ice_port, int pkt_size,
-                     char *cert_file, char *key_file,
-                     char *cert_buf, char *key_buf,
-                     int is_dtls_active);
+int ff_rtc_init_certificate(void *logctx, RTCContext *rtc);
+int ff_rtc_dtls_open(void *logctx, RTCContext *rtc, int is_dtls_active);
 int ff_rtc_udp_connect(void *logctx, RTCContext *rtc);
 #endif /* AVFORMAT_RTC_H */

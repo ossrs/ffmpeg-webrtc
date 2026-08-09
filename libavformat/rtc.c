@@ -28,8 +28,9 @@
 #include "avio_internal.h"
 #include "internal.h"
 #include "network.h"
-#include "rtc.h"
 #include "tls.h"
+#include "rtc.h"
+
 
 /* The magic cookie for Session Traversal Utilities for NAT (STUN) messages. */
 #define STUN_MAGIC_COOKIE 0x2112A442
@@ -265,28 +266,25 @@ int ff_rtc_is_rtcp(const uint8_t *b, int size)
  * Get or Generate a self-signed certificate and private key for DTLS,
  * fingerprint for SDP
  */
-av_cold int ff_rtc_init_certificate(void *logctx, char *key_file,
-                                    char *cert_file, char *key_buf,
-                                    size_t key_buf_size, char *cert_buf,
-                                    size_t cert_buf_size, char **fingerprint)
+av_cold int ff_rtc_init_certificate(void *logctx, RTCContext *rtc)
 {
     int ret = 0;
 
-    if (cert_file && key_file) {
+    if (rtc->cert_file && rtc->key_file) {
         /* Read the private key and certificate from the file. */
-        if ((ret = ff_ssl_read_key_cert(key_file, cert_file,
-                                        key_buf, key_buf_size,
-                                        cert_buf, cert_buf_size,
-                                        fingerprint)) < 0) {
+        if ((ret = ff_ssl_read_key_cert(rtc->key_file, rtc->cert_file,
+                                        rtc->key_buf, sizeof(rtc->key_buf),
+                                        rtc->cert_buf, sizeof(rtc->cert_buf),
+                                        &(rtc->dtls_fingerprint))) < 0) {
             av_log(logctx, AV_LOG_ERROR, "Failed to read DTLS certificate from cert=%s, key=%s\n",
-                cert_file, key_file);
+                rtc->cert_file, rtc->key_file);
             return ret;
         }
     } else {
         /* Generate a private key to ctx->dtls_pkey and self-signed certificate. */
-        if ((ret = ff_ssl_gen_key_cert(key_buf, key_buf_size,
-                                       cert_buf, cert_buf_size,
-                                       fingerprint)) < 0) {
+        if ((ret = ff_ssl_gen_key_cert(rtc->key_buf, sizeof(rtc->key_buf),
+                                       rtc->cert_buf, sizeof(rtc->cert_buf),
+                                       &(rtc->dtls_fingerprint))) < 0) {
             av_log(logctx, AV_LOG_ERROR, "Failed to generate DTLS private key and certificate\n");
             return ret;
         }
@@ -295,42 +293,37 @@ av_cold int ff_rtc_init_certificate(void *logctx, char *key_file,
     return ret;
 }
 
-av_cold int ff_rtc_dtls_open(void *logctx, AVFormatContext *s,
-                             URLContext **dtls_uc, URLContext *udp,
-                             char *ice_host, int ice_port, int pkt_size,
-                             char *cert_file, char *key_file,
-                             char *cert_buf, char *key_buf,
-                             int is_dtls_active)
+av_cold int ff_rtc_dtls_open(void *logctx, RTCContext *rtc, int is_dtls_active)
 {
     int ret = 0;
     AVDictionary *opts = NULL;
     char buf[256];
 
-    ff_url_join(buf, sizeof(buf), "dtls", NULL, ice_host, ice_port, NULL);
-    av_dict_set_int(&opts, "mtu", pkt_size, 0);
-    if (cert_file) {
-        av_dict_set(&opts, "cert_file", cert_file, 0);
+    ff_url_join(buf, sizeof(buf), "dtls", NULL, rtc->ice_host, rtc->ice_port, NULL);
+    av_dict_set_int(&opts, "mtu", rtc->pkt_size, 0);
+    if (rtc->cert_file) {
+        av_dict_set(&opts, "cert_file", rtc->cert_file, 0);
     } else
-        av_dict_set(&opts, "cert_pem", cert_buf, 0);
+        av_dict_set(&opts, "cert_pem", rtc->cert_buf, 0);
 
-    if (key_file) {
-        av_dict_set(&opts, "key_file", key_file, 0);
+    if (rtc->key_file) {
+        av_dict_set(&opts, "key_file", rtc->key_file, 0);
     } else
-        av_dict_set(&opts, "key_pem", key_buf, 0);
+        av_dict_set(&opts, "key_pem", rtc->key_buf, 0);
     av_dict_set_int(&opts, "external_sock", 1, 0);
     av_dict_set_int(&opts, "use_srtp", 1, 0);
     av_dict_set_int(&opts, "listen", is_dtls_active ? 0 : 1, 0);
     // Do not verify CA
     av_dict_set_int(&opts, "verify", 0, 0);
-    ret = ffurl_open_whitelist(dtls_uc, buf, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
-        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
+    ret = ffurl_open_whitelist(&(rtc->dtls_uc), buf, AVIO_FLAG_READ_WRITE, &rtc->ctx->interrupt_callback,
+        &opts, rtc->ctx->protocol_whitelist, rtc->ctx->protocol_blacklist, NULL);
     av_dict_free(&opts);
     if (ret < 0) {
         av_log(logctx, AV_LOG_ERROR, "Failed to open DTLS url:%s\n", buf);
         goto end;
     }
     /* reuse the udp created by whip */
-    ff_tls_set_external_socket(*dtls_uc, udp);
+    ff_tls_set_external_socket(rtc->dtls_uc, rtc->udp);
 end:
     return ret;
 }
