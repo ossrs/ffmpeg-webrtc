@@ -145,7 +145,7 @@ int ff_rtc_ice_is_binding_response(uint8_t *b, int size);
 int ff_rtc_is_rtp_or_rtcp(const uint8_t *b, int size);
 int ff_rtc_is_rtcp(const uint8_t *b, int size);
 
-int ff_rtc_init_certificate(void *logctx, RTCContext *rtc);
-int ff_rtc_dtls_open(void *logctx, RTCContext *rtc, int is_dtls_active);
-int ff_rtc_udp_connect(void *logctx, RTCContext *rtc);
+int ff_rtc_init_certificate(RTCContext *rtc);
+int ff_rtc_dtls_open(RTCContext *rtc, int is_dtls_active);
+int ff_rtc_udp_connect(RTCContext *rtc);
 #endif /* AVFORMAT_RTC_H */

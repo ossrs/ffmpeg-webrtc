@@ -240,7 +240,7 @@ static av_cold int certificate_key_init(AVFormatContext *s)
 {
     WHIPContext *whip = s->priv_data;
 
-    return ff_rtc_init_certificate(s, &(whip->rtc));
+    return ff_rtc_init_certificate(&(whip->rtc));
 }
 
 static av_cold int dtls_initialize(AVFormatContext *s)
@@ -248,7 +248,7 @@ static av_cold int dtls_initialize(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE;
 
-    return ff_rtc_dtls_open(whip, &(whip->rtc), is_dtls_active);
+    return ff_rtc_dtls_open(&(whip->rtc), is_dtls_active);
 }
 
 /**
@@ -901,7 +901,7 @@ static int udp_connect(AVFormatContext *s)
     // AVDictionary *opts = NULL;
     WHIPContext *whip = s->priv_data;
 
-    ret = ff_rtc_udp_connect(whip, &(whip->rtc));
+    ret = ff_rtc_udp_connect(&(whip->rtc));
     if (ret < 0) {
         av_log(whip, AV_LOG_ERROR, "udp failed!");
         goto end;

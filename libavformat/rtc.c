@@ -266,7 +266,7 @@ int ff_rtc_is_rtcp(const uint8_t *b, int size)
  * Get or Generate a self-signed certificate and private key for DTLS,
  * fingerprint for SDP
  */
-av_cold int ff_rtc_init_certificate(void *logctx, RTCContext *rtc)
+av_cold int ff_rtc_init_certificate(RTCContext *rtc)
 {
     int ret = 0;
 
@@ -276,7 +276,7 @@ av_cold int ff_rtc_init_certificate(void *logctx, RTCContext *rtc)
                                         rtc->key_buf, sizeof(rtc->key_buf),
                                         rtc->cert_buf, sizeof(rtc->cert_buf),
                                         &(rtc->dtls_fingerprint))) < 0) {
-            av_log(logctx, AV_LOG_ERROR, "Failed to read DTLS certificate from cert=%s, key=%s\n",
+            av_log(rtc->ctx, AV_LOG_ERROR, "Failed to read DTLS certificate from cert=%s, key=%s\n",
                 rtc->cert_file, rtc->key_file);
             return ret;
         }
@@ -285,7 +285,7 @@ av_cold int ff_rtc_init_certificate(void *logctx, RTCContext *rtc)
         if ((ret = ff_ssl_gen_key_cert(rtc->key_buf, sizeof(rtc->key_buf),
                                        rtc->cert_buf, sizeof(rtc->cert_buf),
                                        &(rtc->dtls_fingerprint))) < 0) {
-            av_log(logctx, AV_LOG_ERROR, "Failed to generate DTLS private key and certificate\n");
+            av_log(rtc->ctx, AV_LOG_ERROR, "Failed to generate DTLS private key and certificate\n");
             return ret;
         }
     }
@@ -293,7 +293,7 @@ av_cold int ff_rtc_init_certificate(void *logctx, RTCContext *rtc)
     return ret;
 }
 
-av_cold int ff_rtc_dtls_open(void *logctx, RTCContext *rtc, int is_dtls_active)
+av_cold int ff_rtc_dtls_open(RTCContext *rtc, int is_dtls_active)
 {
     int ret = 0;
     AVDictionary *opts = NULL;
@@ -319,7 +319,7 @@ av_cold int ff_rtc_dtls_open(void *logctx, RTCContext *rtc, int is_dtls_active)
         &opts, rtc->ctx->protocol_whitelist, rtc->ctx->protocol_blacklist, NULL);
     av_dict_free(&opts);
     if (ret < 0) {
-        av_log(logctx, AV_LOG_ERROR, "Failed to open DTLS url:%s\n", buf);
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to open DTLS url:%s\n", buf);
         goto end;
     }
     /* reuse the udp created by whip */
@@ -328,7 +328,7 @@ end:
     return ret;
 }
 
-int ff_rtc_udp_connect(void *logctx, RTCContext *rtc)
+int ff_rtc_udp_connect(RTCContext *rtc)
 {
     int ret = 0;
     char url[256];
@@ -346,7 +346,7 @@ int ff_rtc_udp_connect(void *logctx, RTCContext *rtc)
     ret = ffurl_open_whitelist(&rtc->udp, url, AVIO_FLAG_WRITE, &rtc->ctx->interrupt_callback,
         &opts, rtc->ctx->protocol_whitelist, rtc->ctx->protocol_blacklist, NULL);
     if (ret < 0) {
-        av_log(logctx, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", rtc->ice_host, rtc->ice_port);
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", rtc->ice_host, rtc->ice_port);
         goto end;
     }
 
