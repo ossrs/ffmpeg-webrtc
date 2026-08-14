@@ -31,6 +31,7 @@
 #include "demux.h"
 #include "http.h"
 #include "internal.h"
+#include "network.h"
 #include "rtc.h"
 #include "tls.h"
 
@@ -48,6 +49,7 @@ enum WHEPState {
     WHEP_STATE_OFFER,
     WHEP_STATE_ANSWER,
     WHEP_STATE_NEGOTIATED,
+    WHEP_STATE_UDP_CONNECTED,
     WHEP_STATE_FAILED,
 };
 
@@ -56,6 +58,9 @@ typedef struct WHEPContext {
     enum WHEPState state;
 
     RTCContext rtc;
+
+    /* The UDP transport is used for delivering ICE, DTLS and SRTP packets. */
+    URLContext *udp;
 
     char *sdp_offer;
     char *sdp_answer;
@@ -421,6 +426,37 @@ end:
     return ret;
 }
 
+static int udp_connect(AVFormatContext *s)
+{
+    int ret = 0;
+    char url[256];
+    AVDictionary *opts = NULL;
+    WHEPContext *whep = s->priv_data;
+
+    ff_url_join(url, sizeof(url), "udp", NULL, whep->rtc.ice_host, whep->rtc.ice_port, NULL);
+    av_dict_set_int(&opts, "connect", 1, 0);
+    av_dict_set_int(&opts, "fifo_size", 0, 0);
+
+    ret = ffurl_open_whitelist(&whep->udp, url, AVIO_FLAG_WRITE, &s->interrupt_callback,
+        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
+    if (ret < 0) {
+        av_log(whep, AV_LOG_ERROR, "Failed to connect udp://%s:%d\n", whep->rtc.ice_host, whep->rtc.ice_port);
+        goto end;
+    }
+
+    ff_socket_nonblock(ffurl_get_file_handle(whep->udp), 1);
+    whep->udp->flags |= AVIO_FLAG_READ | AVIO_FLAG_NONBLOCK;
+
+    if (whep->state < WHEP_STATE_UDP_CONNECTED)
+        whep->state = WHEP_STATE_UDP_CONNECTED;
+    av_log(whep, AV_LOG_VERBOSE, "UDP state=%d, elapsed=%.2fms, connected to udp://%s:%d\n",
+        whep->state, ELAPSED(whep->whep_starttime, av_gettime_relative()), whep->rtc.ice_host, whep->rtc.ice_port);
+
+end:
+    av_dict_free(&opts);
+    return ret;
+}
+
 static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     /* RTP receive/depacketization is not implemented yet; deferred to a
@@ -443,6 +479,9 @@ static av_cold int whep_init(AVFormatContext *s)
         goto end;
 
     if ((ret = parse_answer(s)) < 0)
+        goto end;
+
+    if ((ret = udp_connect(s)) < 0)
         goto end;
 
 end:
