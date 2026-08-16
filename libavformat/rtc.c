@@ -19,12 +19,18 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavcodec/h264.h"
 #include "libavutil/attributes_internal.h"
+#include "libavutil/avassert.h"
 #include "libavutil/crc.h"
 #include "libavutil/hmac.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/avstring.h"
+#include "libavutil/random_seed.h"
+#include "libavcodec/startcode.h"
 
+#include "nal.h"
+#include "avc.h"
 #include "avio_internal.h"
 #include "internal.h"
 #include "network.h"
@@ -51,6 +57,180 @@ enum STUNAttr {
     STUN_ATTR_FINGERPRINT       = 0x8028,
     STUN_ATTR_ICE_CONTROLLING   = 0x802A,
 };
+
+/**
+ * When duplicating a stream, the demuxer has already set the extradata, profile, and
+ * level of the par. Keep in mind that this function will not be invoked since the
+ * profile and level are set.
+ *
+ * When utilizing an encoder, such as libx264, to encode a stream, the extradata in
+ * par->extradata contains the SPS, which includes profile and level information.
+ * However, the profile and level of par remain unspecified. Therefore, it is necessary
+ * to extract the profile and level data from the extradata and assign it to the par's
+ * profile and level. Keep in mind that AVFMT_GLOBALHEADER must be enabled; otherwise,
+ * the extradata will remain empty.
+ */
+static int parse_profile_level(RTCContext *rtc, AVCodecParameters *par)
+{
+    int ret = 0;
+    const uint8_t *r = par->extradata, *r1, *end = par->extradata + par->extradata_size;
+    H264SPS seq, *const sps = &seq;
+    uint32_t state;
+    AVFormatContext *s = rtc->ctx;
+
+    if (par->codec_id != AV_CODEC_ID_H264)
+        return ret;
+
+    if (par->profile != AV_PROFILE_UNKNOWN && par->level != AV_LEVEL_UNKNOWN)
+        return ret;
+
+    if (!par->extradata || par->extradata_size <= 0) {
+        av_log(s, AV_LOG_ERROR, "Unable to parse profile from empty extradata=%p, size=%d\n",
+            par->extradata, par->extradata_size);
+        return AVERROR(EINVAL);
+    }
+
+    while (1) {
+        r = avpriv_find_start_code(r, end, &state);
+        if (r >= end)
+            break;
+
+        r1 = ff_nal_find_startcode(r, end);
+        if ((state & 0x1f) == H264_NAL_SPS) {
+            ret = ff_avc_decode_sps(sps, r, r1 - r);
+            if (ret < 0) {
+                av_log(s, AV_LOG_ERROR, "Failed to decode SPS, state=%x, size=%d\n",
+                    state, (int)(r1 - r));
+                return ret;
+            }
+
+            av_log(s, AV_LOG_VERBOSE, "Parse profile=%d, level=%d from SPS\n",
+                sps->profile_idc, sps->level_idc);
+            par->profile = sps->profile_idc;
+            par->level = sps->level_idc;
+        }
+
+        r = r1;
+    }
+
+    return ret;
+}
+
+/**
+ * Parses video SPS/PPS from the extradata of codecpar and checks the codec.
+ * Currently only supports video(h264) and audio(opus). Note that only baseline
+ * and constrained baseline profiles of h264 are supported.
+ *
+ * If the profile is less than 0, the function considers the profile as baseline.
+ * It may need to parse the profile from SPS/PPS. This situation occurs when ingesting
+ * desktop and transcoding.
+ *
+ * @param s Pointer to the AVFormatContext
+ * @returns Returns 0 if successful or AVERROR_xxx in case of an error.
+ *
+ * TODO: FIXME: There is an issue with the timestamp of OPUS audio, especially when
+ *  the input is an MP4 file. The timestamp deviates from the expected value of 960,
+ *  causing Chrome to play the audio stream with noise. This problem can be replicated
+ *  by transcoding a specific file into MP4 format and publishing it using the WHIP
+ *  muxer. However, when directly transcoding and publishing through the WHIP muxer,
+ *  the issue is not present, and the audio timestamp remains consistent. The root
+ *  cause is still unknown, and this comment has been added to address this issue
+ *  in the future. Further research is needed to resolve the problem.
+ */
+static int parse_codec(RTCContext *rtc)
+{
+    int i, ret = 0;
+    AVFormatContext *s = rtc->ctx;
+
+    for (i = 0; i < s->nb_streams; i++) {
+        AVCodecParameters *par = s->streams[i]->codecpar;
+        switch (par->codec_type) {
+        case AVMEDIA_TYPE_VIDEO:
+            rtc->video_par = par;
+
+            if (par->video_delay > 0) {
+                av_log(s, AV_LOG_ERROR, "Unsupported B frames by RTC\n");
+                return AVERROR_PATCHWELCOME;
+            }
+
+            if ((ret = parse_profile_level(rtc, par)) < 0) {
+                av_log(s, AV_LOG_ERROR, "Failed to parse SPS/PPS from extradata\n");
+                return AVERROR(EINVAL);
+            }
+
+            if (par->profile == AV_PROFILE_UNKNOWN) {
+                av_log(s, AV_LOG_WARNING, "No profile found in extradata, consider baseline\n");
+                return AVERROR(EINVAL);
+            }
+            if (par->level == AV_LEVEL_UNKNOWN) {
+                av_log(s, AV_LOG_WARNING, "No level found in extradata, consider 3.1\n");
+                return AVERROR(EINVAL);
+            }
+            break;
+        case AVMEDIA_TYPE_AUDIO:
+            rtc->audio_par = par;
+
+            if (par->ch_layout.nb_channels != 2) {
+                av_log(s, AV_LOG_ERROR, "Unsupported audio channels %d by RTC, choose stereo\n",
+                    par->ch_layout.nb_channels);
+                return AVERROR_PATCHWELCOME;
+            }
+
+            if (par->sample_rate != 48000) {
+                av_log(s, AV_LOG_ERROR, "Unsupported audio sample rate %d by RTC, choose 48000\n", par->sample_rate);
+                return AVERROR_PATCHWELCOME;
+            }
+            break;
+        default:
+            av_unreachable("already checked via FF_OFMT flags");
+        }
+    }
+
+    return ret;
+}
+
+
+int rtc_init(RTCContext *rtc) {
+
+    uint32_t seed;
+    int ret, ideal_pkt_size = 532;
+
+    /**
+    * Get or Generate a self-signed certificate and private key for DTLS,
+    * fingerprint for SDP
+    */
+    ret = ff_rtc_init_certificate(rtc);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to init certificate and key\n");
+        return ret;
+    }
+
+    /* Initialize the random number generator. */
+    seed = av_get_random_seed();
+    av_lfg_init(&rtc->rnd, seed);
+
+    /* 64 bit tie breaker for ICE-CONTROLLING (RFC 8445 16.1) */
+    ret = av_random_bytes((uint8_t *)&rtc->ice_tie_breaker, sizeof(rtc->ice_tie_breaker));
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Couldn't generate random bytes for ICE tie breaker\n");
+        return ret;
+    }
+
+    rtc->audio_first_seq = av_lfg_get(&rtc->rnd) & 0x0fff;
+    rtc->video_first_seq = rtc->audio_first_seq + 1;
+
+    if (rtc->pkt_size < ideal_pkt_size)
+        av_log(rtc->ctx, AV_LOG_WARNING, "pkt_size=%d(<%d) is too small, may cause packet loss\n",
+               rtc->pkt_size, ideal_pkt_size);
+
+    if ((ret = parse_codec(rtc)) < 0)
+        return ret;
+
+    if (rtc->state < RTC_STATE_INIT)
+        rtc->state = RTC_STATE_INIT;
+
+    return 0;
+}
 
 /**
  * Creates and marshals an ICE binding request packet.

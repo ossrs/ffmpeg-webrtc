@@ -81,8 +81,40 @@
 #define RTC_RTCP_PT_START 192
 #define RTC_RTCP_PT_END   223
 
+enum RTCState {
+    RTC_STATE_NONE,
+
+    /* The initial state. */
+    RTC_STATE_INIT,
+    /* The muxer has sent the offer to the peer. */
+    RTC_STATE_OFFER,
+    /* The muxer has received the answer from the peer. */
+    RTC_STATE_ANSWER,
+    /**
+     * After parsing the answer received from the peer, the muxer negotiates the abilities
+     * in the offer that it generated.
+     */
+    RTC_STATE_NEGOTIATED,
+    /* The muxer has connected to the peer via UDP. */
+    RTC_STATE_UDP_CONNECTED,
+    /* The muxer has sent the ICE request to the peer. */
+    RTC_STATE_ICE_CONNECTING,
+    /* The muxer has received the ICE response from the peer. */
+    RTC_STATE_ICE_CONNECTED,
+    /* The muxer has finished the DTLS handshake with the peer. */
+    RTC_STATE_DTLS_FINISHED,
+    /* The muxer has finished the SRTP setup. */
+    RTC_STATE_SRTP_FINISHED,
+    /* The muxer is ready to send/receive media frames. */
+    RTC_STATE_READY,
+    /* The muxer is failed. */
+    RTC_STATE_FAILED,
+};
+
 typedef struct RTCContext {
     AVFormatContext *ctx;
+
+    enum RTCState state;
 
     /* The random number generator. */
     AVLFG rnd;
@@ -130,7 +162,17 @@ typedef struct RTCContext {
      */
     int pkt_size;
     int ts_buffer_size;/* Underlying protocol send/receive buffer size */
+
+    uint16_t audio_first_seq;
+    uint16_t video_first_seq;
+
+    /* Parameters for the input audio and video codecs. */
+    AVCodecParameters *audio_par;
+    AVCodecParameters *video_par;
+
 } RTCContext;
+
+int rtc_init(RTCContext *rtc);
 
 int ff_rtc_ice_create_binding_request(RTCContext *rtc,
                                       uint8_t *buf, int buf_size,
