@@ -363,6 +363,129 @@ end:
     return ret;
 }
 
+/**
+ * Parses the ICE ufrag, pwd, and candidates from the SDP answer.
+ *
+ * This function is used to extract the ICE ufrag, pwd, and candidates from the SDP answer.
+ * It returns an error if any of these fields is NULL. The function only uses the first
+ * candidate if there are multiple candidates. However, support for multiple candidates
+ * will be added in the future.
+ *
+ * @param s Pointer to the AVFormatContext
+ * @returns Returns 0 if successful or AVERROR_xxx if an error occurs.
+ */
+int rtc_parse_answer(RTCContext *rtc, char *sdp_answer)
+{
+    int ret = 0;
+    AVIOContext *pb;
+    char line[MAX_URL_SIZE];
+    const char *ptr;
+    int i;
+
+    if (!sdp_answer || !strlen(sdp_answer)) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "No answer to parse\n");
+        return AVERROR(EINVAL);
+    }
+
+    pb = avio_alloc_context(sdp_answer, strlen(sdp_answer), 0, NULL, NULL, NULL, NULL);
+    if (!pb)
+        return AVERROR(ENOMEM);
+
+    for (i = 0; !avio_feof(pb); i++) {
+        ff_get_chomp_line(pb, line, sizeof(line));
+        if (av_strstart(line, "a=ice-lite", &ptr))
+            rtc->is_peer_ice_lite = 1;
+        if (av_strstart(line, "a=ice-ufrag:", &ptr) && !rtc->ice_ufrag_remote) {
+            rtc->ice_ufrag_remote = av_strdup(ptr);
+            if (!rtc->ice_ufrag_remote) {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+        } else if (av_strstart(line, "a=ice-pwd:", &ptr) && !rtc->ice_pwd_remote) {
+            rtc->ice_pwd_remote = av_strdup(ptr);
+            if (!rtc->ice_pwd_remote) {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+        } else if (av_strstart(line, "a=fingerprint:", &ptr) && !rtc->remote_fingerprint) {
+            /* SDP a=fingerprint format is "<algo> <hex:hex:...>". Skip
+             * the algo token, store the hex string for post-handshake compare. */
+            const char *space = strchr(ptr, ' ');
+            if (space) {
+                rtc->remote_fingerprint = av_strdup(space + 1);
+                if (!rtc->remote_fingerprint) {
+                    ret = AVERROR(ENOMEM);
+                    goto end;
+                }
+            }
+        } else if (av_strstart(line, "a=candidate:", &ptr) && !rtc->ice_protocol) {
+            if (ptr && av_stristr(ptr, "host")) {
+                /* Refer to RFC 5245 15.1 */
+                char foundation[33], protocol[17], host[129];
+                int component_id, priority, port;
+                ret = sscanf(ptr, "%32s %d %16s %d %128s %d typ host", foundation, &component_id, protocol, &priority, host, &port);
+                if (ret != 6) {
+                    av_log(rtc->ctx, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s\n",
+                        ret, i, line, sdp_answer);
+                    ret = AVERROR(EIO);
+                    goto end;
+                }
+
+                if (av_strcasecmp(protocol, "udp")) {
+                    av_log(rtc->ctx, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp, line %d %s of %s\n",
+                        protocol, i, line, sdp_answer);
+                    ret = AVERROR(EIO);
+                    goto end;
+                }
+
+                rtc->ice_protocol = av_strdup(protocol);
+                rtc->ice_host = av_strdup(host);
+                rtc->ice_port = port;
+                if (!rtc->ice_protocol || !rtc->ice_host) {
+                    ret = AVERROR(ENOMEM);
+                    goto end;
+                }
+            }
+        }
+    }
+
+    if (!rtc->ice_pwd_remote || !strlen(rtc->ice_pwd_remote)) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "No remote ice pwd parsed from %s\n", sdp_answer);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (!rtc->ice_ufrag_remote || !strlen(rtc->ice_ufrag_remote)) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "No remote ice ufrag parsed from %s\n", sdp_answer);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (!rtc->ice_protocol || !rtc->ice_host || !rtc->ice_port) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "No ice candidate parsed from %s\n", sdp_answer);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    /* per RFC 8829/8842, SDP answer MUST carry a=fingerprint and that
+     * fingerprint MUST match the DTLS peer certificate. Without it, an
+     * on-path attacker can complete DTLS with an arbitrary self-signed
+     * certificate and the resulting SRTP session is unauthenticated. */
+    if (!rtc->remote_fingerprint || !strlen(rtc->remote_fingerprint)) {
+        av_log(rtc->ctx, AV_LOG_ERROR,
+               "No remote DTLS fingerprint in SDP answer; refusing unauthenticated session\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (rtc->state < RTC_STATE_NEGOTIATED)
+        rtc->state = RTC_STATE_NEGOTIATED;
+
+end:
+    avio_context_free(&pb);
+    return ret;
+}
+
 
 int rtc_init(RTCContext *rtc) {
 

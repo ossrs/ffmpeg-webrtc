@@ -201,4 +201,5 @@ int ff_rtc_init_certificate(RTCContext *rtc);
 int ff_rtc_dtls_open(RTCContext *rtc, int is_dtls_active);
 int ff_rtc_udp_connect(RTCContext *rtc);
 int rtc_generate_sdp_offer(RTCContext *rtc, char **sdp_offer, int is_dtls_active);
+int rtc_parse_answer(RTCContext *rtc, char *sdp_answer);
 #endif /* AVFORMAT_RTC_H */

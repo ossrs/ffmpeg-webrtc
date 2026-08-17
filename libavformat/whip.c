@@ -365,134 +365,6 @@ end:
 }
 
 /**
- * Parses the ICE ufrag, pwd, and candidates from the SDP answer.
- *
- * This function is used to extract the ICE ufrag, pwd, and candidates from the SDP answer.
- * It returns an error if any of these fields is NULL. The function only uses the first
- * candidate if there are multiple candidates. However, support for multiple candidates
- * will be added in the future.
- *
- * @param s Pointer to the AVFormatContext
- * @returns Returns 0 if successful or AVERROR_xxx if an error occurs.
- */
-static int parse_answer(AVFormatContext *s)
-{
-    int ret = 0;
-    AVIOContext *pb;
-    char line[MAX_URL_SIZE];
-    const char *ptr;
-    int i;
-    WHIPContext *whip = s->priv_data;
-
-    if (!whip->sdp_answer || !strlen(whip->sdp_answer)) {
-        av_log(whip, AV_LOG_ERROR, "No answer to parse\n");
-        return AVERROR(EINVAL);
-    }
-
-    pb = avio_alloc_context(whip->sdp_answer, strlen(whip->sdp_answer), 0, NULL, NULL, NULL, NULL);
-    if (!pb)
-        return AVERROR(ENOMEM);
-
-    for (i = 0; !avio_feof(pb); i++) {
-        ff_get_chomp_line(pb, line, sizeof(line));
-        if (av_strstart(line, "a=ice-lite", &ptr))
-            whip->rtc.is_peer_ice_lite = 1;
-        if (av_strstart(line, "a=ice-ufrag:", &ptr) && !whip->rtc.ice_ufrag_remote) {
-            whip->rtc.ice_ufrag_remote = av_strdup(ptr);
-            if (!whip->rtc.ice_ufrag_remote) {
-                ret = AVERROR(ENOMEM);
-                goto end;
-            }
-        } else if (av_strstart(line, "a=ice-pwd:", &ptr) && !whip->rtc.ice_pwd_remote) {
-            whip->rtc.ice_pwd_remote = av_strdup(ptr);
-            if (!whip->rtc.ice_pwd_remote) {
-                ret = AVERROR(ENOMEM);
-                goto end;
-            }
-        } else if (av_strstart(line, "a=fingerprint:", &ptr) && !whip->rtc.remote_fingerprint) {
-            /* SDP a=fingerprint format is "<algo> <hex:hex:...>". Skip
-             * the algo token, store the hex string for post-handshake compare. */
-            const char *space = strchr(ptr, ' ');
-            if (space) {
-                whip->rtc.remote_fingerprint = av_strdup(space + 1);
-                if (!whip->rtc.remote_fingerprint) {
-                    ret = AVERROR(ENOMEM);
-                    goto end;
-                }
-            }
-        } else if (av_strstart(line, "a=candidate:", &ptr) && !whip->rtc.ice_protocol) {
-            if (ptr && av_stristr(ptr, "host")) {
-                /* Refer to RFC 5245 15.1 */
-                char foundation[33], protocol[17], host[129];
-                int component_id, priority, port;
-                ret = sscanf(ptr, "%32s %d %16s %d %128s %d typ host", foundation, &component_id, protocol, &priority, host, &port);
-                if (ret != 6) {
-                    av_log(whip, AV_LOG_ERROR, "Failed %d to parse line %d %s from %s\n",
-                        ret, i, line, whip->sdp_answer);
-                    ret = AVERROR(EIO);
-                    goto end;
-                }
-
-                if (av_strcasecmp(protocol, "udp")) {
-                    av_log(whip, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose udp, line %d %s of %s\n",
-                        protocol, i, line, whip->sdp_answer);
-                    ret = AVERROR(EIO);
-                    goto end;
-                }
-
-                whip->rtc.ice_protocol = av_strdup(protocol);
-                whip->rtc.ice_host = av_strdup(host);
-                whip->rtc.ice_port = port;
-                if (!whip->rtc.ice_protocol || !whip->rtc.ice_host) {
-                    ret = AVERROR(ENOMEM);
-                    goto end;
-                }
-            }
-        }
-    }
-
-    if (!whip->rtc.ice_pwd_remote || !strlen(whip->rtc.ice_pwd_remote)) {
-        av_log(whip, AV_LOG_ERROR, "No remote ice pwd parsed from %s\n", whip->sdp_answer);
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    if (!whip->rtc.ice_ufrag_remote || !strlen(whip->rtc.ice_ufrag_remote)) {
-        av_log(whip, AV_LOG_ERROR, "No remote ice ufrag parsed from %s\n", whip->sdp_answer);
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    if (!whip->rtc.ice_protocol || !whip->rtc.ice_host || !whip->rtc.ice_port) {
-        av_log(whip, AV_LOG_ERROR, "No ice candidate parsed from %s\n", whip->sdp_answer);
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    /* per RFC 8829/8842, SDP answer MUST carry a=fingerprint and that
-     * fingerprint MUST match the DTLS peer certificate. Without it, an
-     * on-path attacker can complete DTLS with an arbitrary self-signed
-     * certificate and the resulting SRTP session is unauthenticated. */
-    if (!whip->rtc.remote_fingerprint || !strlen(whip->rtc.remote_fingerprint)) {
-        av_log(whip, AV_LOG_ERROR,
-               "No remote DTLS fingerprint in SDP answer; refusing unauthenticated session\n");
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    if (whip->state < WHIP_STATE_NEGOTIATED)
-        whip->state = WHIP_STATE_NEGOTIATED;
-    whip->whip_answer_time = av_gettime_relative();
-    av_log(whip, AV_LOG_VERBOSE, "SDP state=%d, offer=%zuB, answer=%zuB, ufrag=%s, pwd=%zuB, transport=%s://%s:%d, elapsed=%.2fms\n",
-        whip->state, strlen(whip->sdp_offer), strlen(whip->sdp_answer), whip->rtc.ice_ufrag_remote, strlen(whip->rtc.ice_pwd_remote),
-        whip->rtc.ice_protocol, whip->rtc.ice_host, whip->rtc.ice_port, ELAPSED(whip->whip_starttime, av_gettime_relative()));
-
-end:
-    avio_context_free(&pb);
-    return ret;
-}
-
-/**
  * This function handles incoming binding request messages by responding to them.
  * If the message is not a binding request, it will be ignored.
  */
@@ -1120,8 +992,12 @@ static av_cold int whip_init(AVFormatContext *s)
     if ((ret = exchange_sdp(s)) < 0)
         goto end;
 
-    if ((ret = parse_answer(s)) < 0)
+    if ((ret = rtc_parse_answer(&whip->rtc, whip->sdp_answer)) < 0)
         goto end;
+    whip->whip_answer_time = av_gettime_relative();
+    av_log(whip, AV_LOG_VERBOSE, "SDP state=%d, offer=%zuB, answer=%zuB, ufrag=%s, pwd=%zuB, transport=%s://%s:%d, elapsed=%.2fms\n",
+        whip->rtc.state, strlen(whip->sdp_offer), strlen(whip->sdp_answer), whip->rtc.ice_ufrag_remote, strlen(whip->rtc.ice_pwd_remote),
+        whip->rtc.ice_protocol, whip->rtc.ice_host, whip->rtc.ice_port, ELAPSED(whip->whip_starttime, av_gettime_relative()));
 
     if ((ret = udp_connect(s)) < 0)
         goto end;
