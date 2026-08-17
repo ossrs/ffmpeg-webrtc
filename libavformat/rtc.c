@@ -27,6 +27,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/avstring.h"
 #include "libavutil/random_seed.h"
+#include "libavutil/mem.h"
 #include "libavcodec/startcode.h"
 
 #include "nal.h"
@@ -47,6 +48,18 @@
  * host candidate priority is 126 << 24 | 65535 << 8 | 255
  */
 #define STUN_HOST_CANDIDATE_PRIORITY 126 << 24 | 65535 << 8 | 255
+
+/* Referring to Chrome's definition of RTP payload types. */
+#define RTC_RTP_PAYLOAD_TYPE_H264 106
+#define RTC_RTP_PAYLOAD_TYPE_OPUS 111
+#define RTC_RTP_PAYLOAD_TYPE_VIDEO_RTX 105
+
+/**
+ * In the case of ICE-LITE, these fields are not used; instead, they are defined
+ * as constant values.
+ */
+#define RTC_SDP_SESSION_ID "4489045141692799359"
+#define RTC_SDP_CREATOR_IP "127.0.0.1"
 
 /* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
 enum STUNAttr {
@@ -186,6 +199,167 @@ static int parse_codec(RTCContext *rtc)
         }
     }
 
+    return ret;
+}
+
+/**
+ * Generate SDP offer according to the codec parameters, DTLS and ICE information.
+ *
+ * Note that we don't use av_sdp_create to generate SDP offer because it doesn't
+ * support DTLS and ICE information.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+int rtc_generate_sdp_offer(RTCContext *rtc, char **sdp_offer, int is_dtls_active)
+{
+    char *sdp = NULL;
+    int ret = 0, profile_idc = 0, level, profile_iop = 0;
+    const char *acodec_name = NULL, *vcodec_name = NULL;
+    char bundle[4];
+    int bundle_index = 0;
+    AVBPrint bp;
+
+    /* To prevent a crash during cleanup, always initialize it. */
+    av_bprint_init(&bp, 1, RTC_MAX_SDP_SIZE);
+
+    snprintf(rtc->ice_ufrag_local, sizeof(rtc->ice_ufrag_local), "%08x",
+        av_lfg_get(&rtc->rnd));
+    snprintf(rtc->ice_pwd_local, sizeof(rtc->ice_pwd_local), "%08x%08x%08x%08x",
+        av_lfg_get(&rtc->rnd), av_lfg_get(&rtc->rnd), av_lfg_get(&rtc->rnd),
+        av_lfg_get(&rtc->rnd));
+
+    rtc->audio_ssrc = av_lfg_get(&rtc->rnd);
+    rtc->video_ssrc = rtc->audio_ssrc + 1;
+    rtc->video_rtx_ssrc = rtc->video_ssrc + 1;
+
+    rtc->audio_payload_type = RTC_RTP_PAYLOAD_TYPE_OPUS;
+    rtc->video_payload_type = RTC_RTP_PAYLOAD_TYPE_H264;
+    rtc->video_rtx_payload_type = RTC_RTP_PAYLOAD_TYPE_VIDEO_RTX;
+
+    if (rtc->audio_par) {
+        bundle[bundle_index++] = '0';
+        bundle[bundle_index++] = ' ';
+    }
+    if (rtc->video_par) {
+        bundle[bundle_index++] = '1';
+        bundle[bundle_index++] = ' ';
+    }
+    bundle[bundle_index - 1] = '\0';
+
+    av_bprintf(&bp, ""
+        "v=0\r\n"
+        "o=FFmpeg %s 2 IN IP4 %s\r\n"
+        "s=FFmpegPublishSession\r\n"
+        "t=0 0\r\n"
+        "a=group:BUNDLE %s\r\n"
+        "a=extmap-allow-mixed\r\n"
+        "a=msid-semantic: WMS\r\n",
+        RTC_SDP_SESSION_ID,
+        RTC_SDP_CREATOR_IP,
+        bundle);
+
+    if (rtc->audio_par) {
+        if (rtc->audio_par->codec_id == AV_CODEC_ID_OPUS)
+            acodec_name = "opus";
+
+        av_bprintf(&bp, ""
+            "m=audio 9 UDP/TLS/RTP/SAVPF %u\r\n"
+            "c=IN IP4 0.0.0.0\r\n"
+            "a=ice-ufrag:%s\r\n"
+            "a=ice-pwd:%s\r\n"
+            "a=fingerprint:sha-256 %s\r\n"
+            "a=setup:%s\r\n"
+            "a=mid:0\r\n"
+            "a=sendonly\r\n"
+            "a=msid:FFmpeg audio\r\n"
+            "a=rtcp-mux\r\n"
+            "a=rtpmap:%u %s/%d/%d\r\n"
+            "a=ssrc:%u cname:FFmpeg\r\n"
+            "a=ssrc:%u msid:FFmpeg audio\r\n",
+            rtc->audio_payload_type,
+            rtc->ice_ufrag_local,
+            rtc->ice_pwd_local,
+            rtc->dtls_fingerprint,
+            is_dtls_active ? "active" : "passive",
+            rtc->audio_payload_type,
+            acodec_name,
+            rtc->audio_par->sample_rate,
+            rtc->audio_par->ch_layout.nb_channels,
+            rtc->audio_ssrc,
+            rtc->audio_ssrc);
+    }
+
+    if (rtc->video_par) {
+        level = rtc->video_par->level;
+        if (rtc->video_par->codec_id == AV_CODEC_ID_H264) {
+            vcodec_name = "H264";
+            profile_iop |= rtc->video_par->profile & AV_PROFILE_H264_CONSTRAINED ? 1 << 6 : 0;
+            profile_iop |= rtc->video_par->profile & AV_PROFILE_H264_INTRA ? 1 << 4 : 0;
+            profile_idc = rtc->video_par->profile & 0x00ff;
+        }
+
+        av_bprintf(&bp, ""
+            "m=video 9 UDP/TLS/RTP/SAVPF %u %u\r\n"
+            "c=IN IP4 0.0.0.0\r\n"
+            "a=ice-ufrag:%s\r\n"
+            "a=ice-pwd:%s\r\n"
+            "a=fingerprint:sha-256 %s\r\n"
+            "a=setup:%s\r\n"
+            "a=mid:1\r\n"
+            "a=sendonly\r\n"
+            "a=msid:FFmpeg video\r\n"
+            "a=rtcp-mux\r\n"
+            "a=rtcp-rsize\r\n"
+            "a=rtpmap:%u %s/90000\r\n"
+            "a=fmtp:%u level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=%02x%02x%02x\r\n"
+            "a=rtcp-fb:%u nack\r\n"
+            "a=rtpmap:%u rtx/90000\r\n"
+            "a=fmtp:%u apt=%u\r\n"
+            "a=ssrc-group:FID %u %u\r\n"
+            "a=ssrc:%u cname:FFmpeg\r\n"
+            "a=ssrc:%u msid:FFmpeg video\r\n",
+            rtc->video_payload_type,
+            rtc->video_rtx_payload_type,
+            rtc->ice_ufrag_local,
+            rtc->ice_pwd_local,
+            rtc->dtls_fingerprint,
+            is_dtls_active ? "active" : "passive",
+            rtc->video_payload_type,
+            vcodec_name,
+            rtc->video_payload_type,
+            profile_idc,
+            profile_iop,
+            level,
+            rtc->video_payload_type,
+            rtc->video_rtx_payload_type,
+            rtc->video_rtx_payload_type,
+            rtc->video_payload_type,
+            rtc->video_ssrc,
+            rtc->video_rtx_ssrc,
+            rtc->video_ssrc,
+            rtc->video_ssrc);
+    }
+
+    if (!av_bprint_is_complete(&bp)) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Offer exceed max %d, %s\n", RTC_MAX_SDP_SIZE, bp.str);
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    sdp = av_strdup(bp.str);
+    if (!sdp) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    if (rtc->state < RTC_STATE_OFFER)
+        rtc->state = RTC_STATE_OFFER;
+    av_log(rtc->ctx, AV_LOG_VERBOSE, "Generated state=%d, offer: %s\n", rtc->state, sdp);
+
+
+end:
+    av_bprint_finalize(&bp, NULL);
+    *sdp_offer = sdp;
     return ret;
 }
 
