@@ -43,6 +43,10 @@
 
 #define ELAPSED(starttime, endtime) ((float)(endtime - starttime) / 1000)
 
+#define MAX_UDP_BUFFER_SIZE 4096
+#define ICE_DTLS_READ_MAX_RETRY 10
+#define ICE_DTLS_READ_SLEEP_DURATION 5
+
 enum WHEPState {
     WHEP_STATE_NONE,
     WHEP_STATE_INIT,
@@ -50,6 +54,9 @@ enum WHEPState {
     WHEP_STATE_ANSWER,
     WHEP_STATE_NEGOTIATED,
     WHEP_STATE_UDP_CONNECTED,
+    WHEP_STATE_ICE_CONNECTING,
+    WHEP_STATE_ICE_CONNECTED,
+    WHEP_STATE_DTLS_FINISHED,
     WHEP_STATE_FAILED,
 };
 
@@ -61,6 +68,10 @@ typedef struct WHEPContext {
 
     /* The UDP transport is used for delivering ICE, DTLS and SRTP packets. */
     URLContext *udp;
+    /* The DTLS transport, established over the UDP socket above. */
+    URLContext *dtls_uc;
+    /* The buffer for UDP transmission. */
+    char buf[MAX_UDP_BUFFER_SIZE];
 
     char *sdp_offer;
     char *sdp_answer;
@@ -74,6 +85,10 @@ typedef struct WHEPContext {
     char *remote_fingerprint;
 
     int64_t timeout;
+    /* Timeout in milliseconds for ICE and DTLS handshake. */
+    int64_t handshake_timeout;
+    /* The maximum size, in bytes, of RTP packets expected over the UDP transport. */
+    int pkt_size;
     char *authorization;
     char *cert_file;
     char *key_file;
@@ -106,6 +121,13 @@ static av_cold int initialize(AVFormatContext *s)
 
     seed = av_get_random_seed();
     av_lfg_init(&whep->rtc.rnd, seed);
+
+    /* 64 bit tie breaker for ICE-CONTROLLING (RFC 8445 16.1) */
+    ret = av_random_bytes((uint8_t *)&whep->rtc.ice_tie_breaker, sizeof(whep->rtc.ice_tie_breaker));
+    if (ret < 0) {
+        av_log(whep, AV_LOG_ERROR, "Couldn't generate random bytes for ICE tie breaker\n");
+        return ret;
+    }
 
     if (whep->state < WHEP_STATE_INIT)
         whep->state = WHEP_STATE_INIT;
@@ -426,6 +448,59 @@ end:
     return ret;
 }
 
+/**
+ * DTLS role (active/passive) should ideally be read from the peer's
+ * a=setup: line in the SDP answer (RFC 8842): if the peer says "passive",
+ * we must be "active", and vice versa. This is not yet implemented; SRS
+ * (the server used for testing) always answers with a=setup:passive, so
+ * hardcoding the WHEP side as DTLS-active is correct against it, but this
+ * is a known simplification to be replaced with real a=setup: parsing in
+ * a follow-up patch.
+ */
+static av_cold int dtls_initialize(AVFormatContext *s)
+{
+    WHEPContext *whep = s->priv_data;
+    const int is_dtls_active = 1;
+
+    return ff_rtc_dtls_open(whep, s, &whep->dtls_uc, whep->udp,
+                            whep->rtc.ice_host, whep->rtc.ice_port, whep->pkt_size,
+                            whep->cert_file, whep->key_file,
+                            whep->cert_buf, whep->key_buf, is_dtls_active);
+}
+
+static int ice_handle_binding_request(AVFormatContext *s, char *buf, int buf_size)
+{
+    int ret = 0, size;
+    char tid[12];
+    WHEPContext *whep = s->priv_data;
+
+    if (!ff_rtc_ice_is_binding_request(buf, buf_size))
+        return ret;
+
+    if (buf_size < RTC_STUN_HEADER_SIZE) {
+        av_log(whep, AV_LOG_ERROR, "Invalid STUN message, expected at least %d, got %d\n",
+            RTC_STUN_HEADER_SIZE, buf_size);
+        return AVERROR(EINVAL);
+    }
+
+    memcpy(tid, buf + 8, 12);
+
+    ret = ff_rtc_ice_create_binding_response(&whep->rtc, tid, sizeof(tid), whep->buf,
+                                             sizeof(whep->buf), &size);
+    if (ret < 0) {
+        av_log(whep, AV_LOG_ERROR, "Failed to create STUN binding response, size=%d\n", size);
+        return ret;
+    }
+
+    ret = ffurl_write(whep->udp, whep->buf, size);
+    if (ret < 0) {
+        av_log(whep, AV_LOG_ERROR, "Failed to send STUN binding response, size=%d\n", size);
+        return ret;
+    }
+
+    return 0;
+}
+
 static int udp_connect(AVFormatContext *s)
 {
     int ret = 0;
@@ -457,6 +532,107 @@ end:
     return ret;
 }
 
+static int ice_dtls_handshake(AVFormatContext *s)
+{
+    int ret = 0, size, i;
+    int64_t starttime = av_gettime_relative(), now;
+    WHEPContext *whep = s->priv_data;
+    const int is_dtls_active = 1;
+
+    if (whep->state < WHEP_STATE_UDP_CONNECTED || !whep->udp) {
+        av_log(whep, AV_LOG_ERROR, "UDP not connected, state=%d, udp=%p\n", whep->state, whep->udp);
+        return AVERROR(EINVAL);
+    }
+
+    while (1) {
+        if (whep->state <= WHEP_STATE_ICE_CONNECTING) {
+            ret = ff_rtc_ice_create_binding_request(&whep->rtc, whep->buf, sizeof(whep->buf),
+                                                    &size);
+            if (ret < 0) {
+                av_log(whep, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
+                goto end;
+            }
+
+            ret = ffurl_write(whep->udp, whep->buf, size);
+            if (ret < 0) {
+                av_log(whep, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
+                goto end;
+            }
+
+            if (whep->state < WHEP_STATE_ICE_CONNECTING)
+                whep->state = WHEP_STATE_ICE_CONNECTING;
+        }
+
+next_packet:
+        if (whep->state >= WHEP_STATE_DTLS_FINISHED)
+            break;
+
+        now = av_gettime_relative();
+        if (now - starttime >= whep->handshake_timeout * 1000) {
+            av_log(whep, AV_LOG_ERROR, "DTLS handshake timeout=%dms, cost=%.2fms, elapsed=%.2fms, state=%d\n",
+                (int)whep->handshake_timeout, ELAPSED(starttime, now), ELAPSED(whep->whep_starttime, now), whep->state);
+            ret = AVERROR(ETIMEDOUT);
+            goto end;
+        }
+
+        for (i = 0; i < ICE_DTLS_READ_MAX_RETRY; i++) {
+            if (whep->state > WHEP_STATE_ICE_CONNECTED)
+                break;
+            ret = ffurl_read(whep->udp, whep->buf, sizeof(whep->buf));
+            if (ret > 0)
+                break;
+            if (ret == AVERROR(EAGAIN)) {
+                av_usleep(ICE_DTLS_READ_SLEEP_DURATION * 1000);
+                continue;
+            }
+            if (is_dtls_active)
+                break;
+            av_log(whep, AV_LOG_ERROR, "Failed to read message\n");
+            goto end;
+        }
+
+        if (ff_rtc_ice_is_binding_response(whep->buf, ret)) {
+            if (whep->state < WHEP_STATE_ICE_CONNECTED) {
+                if (whep->rtc.is_peer_ice_lite)
+                    whep->state = WHEP_STATE_ICE_CONNECTED;
+            }
+            goto next_packet;
+        }
+
+        if (ff_rtc_ice_is_binding_request(whep->buf, ret)) {
+            if ((ret = ice_handle_binding_request(s, whep->buf, ret)) < 0)
+                goto end;
+            goto next_packet;
+        }
+
+        if (ff_is_dtls_packet(whep->buf, ret) || is_dtls_active) {
+            whep->state = WHEP_STATE_ICE_CONNECTED;
+            av_log(whep, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, username=%s:%s, res=%dB, elapsed=%.2fms\n",
+                whep->state, whep->rtc.ice_host, whep->rtc.ice_port,
+                whep->rtc.ice_ufrag_remote, whep->rtc.ice_ufrag_local, ret, ELAPSED(whep->whep_starttime, av_gettime_relative()));
+
+            ret = dtls_initialize(s);
+            if (ret < 0)
+                goto end;
+            ret = ffurl_handshake(whep->dtls_uc);
+            if (ret < 0) {
+                whep->state = WHEP_STATE_FAILED;
+                av_log(whep, AV_LOG_ERROR, "DTLS session failed\n");
+                goto end;
+            }
+            if (!ret) {
+                whep->state = WHEP_STATE_DTLS_FINISHED;
+                av_log(whep, AV_LOG_VERBOSE, "DTLS handshake is done, elapsed=%.2fms\n",
+                    ELAPSED(whep->whep_starttime, av_gettime_relative()));
+            }
+            goto next_packet;
+        }
+    }
+
+end:
+    return ret;
+}
+
 static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     /* RTP receive/depacketization is not implemented yet; deferred to a
@@ -484,6 +660,9 @@ static av_cold int whep_init(AVFormatContext *s)
     if ((ret = udp_connect(s)) < 0)
         goto end;
 
+    if ((ret = ice_dtls_handshake(s)) < 0)
+        goto end;
+
 end:
     if (ret < 0)
         whep->state = WHEP_STATE_FAILED;
@@ -493,6 +672,8 @@ end:
 #define OFFSET(x) offsetof(WHEPContext, x)
 #define DEC AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
+    { "handshake_timeout",  "Timeout in milliseconds for ICE and DTLS handshake",       OFFSET(handshake_timeout),  AV_OPT_TYPE_INT,    { .i64 = 5000 },    -1, INT_MAX, DEC },
+    { "pkt_size",           "The maximum size, in bytes, of RTP packets expected in",   OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, DEC },
     { "timeout",            "Set timeout for socket I/O operations",                    OFFSET(timeout),            AV_OPT_TYPE_DURATION, { .i64 = -1 }, -1, INT_MAX, DEC },
     { "authorization",      "The optional Bearer token for WHEP Authorization",         OFFSET(authorization),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
     { "cert_file",          "The optional certificate file path for DTLS",              OFFSET(cert_file),          AV_OPT_TYPE_STRING, { .str = NULL },     0,       0, DEC },
