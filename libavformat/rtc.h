@@ -76,6 +76,12 @@
 #define RTC_DTLS_SRTP_CHECKSUM_LEN 16
 
 /**
+ * The maximum size of the PEM certificate and private key buffers
+ * used by the DTLS handshake.
+ */
+#define RTC_MAX_CERTIFICATE_SIZE 8192
+
+/**
  * The STUN message header, which is 20 bytes long, comprises the
  * STUNMessageType (1B), MessageLength (2B), MagicCookie (4B),
  * and TransactionID (12B).
@@ -102,6 +108,9 @@
  */
 #define RTC_RTCP_PT_START 192
 #define RTC_RTCP_PT_END   223
+
+/* Calculate the elapsed time from starttime to endtime in milliseconds. */
+#define RTC_ELAPSED(starttime, endtime) ((float)(endtime - starttime) / 1000)
 
 enum RTCState {
     RTC_STATE_NONE,
@@ -183,10 +192,8 @@ typedef struct RTCContext {
     char *local_sdp;
     /* The SDP answer received from the WebRTC server. */
     char *remote_sdp;
-    /* The resource URL returned in the Location header of WHIP HTTP response. */
-    char *resource_url;
     /**
-     * The optional Bearer token for WHIP Authorization.
+     * The optional Bearer token for HTTP Authorization.
      * See https://www.ietf.org/archive/id/draft-ietf-wish-whip-08.html#name-authentication-and-authoriz
      */
     char *authorization;
@@ -195,8 +202,8 @@ typedef struct RTCContext {
     char *cert_file;
     char *key_file;
     /* The certificate and private key content used for DTLS handshake */
-    char cert_buf[MAX_CERTIFICATE_SIZE];
-    char key_buf[MAX_CERTIFICATE_SIZE];
+    char cert_buf[RTC_MAX_CERTIFICATE_SIZE];
+    char key_buf[RTC_MAX_CERTIFICATE_SIZE];
     /* The fingerprint of certificate, used in SDP offer. */
     char *local_fingerprint;
     /* remote DTLS cert fingerprint from SDP answer (sha-256). */
@@ -243,13 +250,13 @@ int ff_rtc_ice_is_binding_response(uint8_t *b, int size);
 int ff_rtc_is_rtp_or_rtcp(const uint8_t *b, int size);
 int ff_rtc_is_rtcp(const uint8_t *b, int size);
 
-int ff_rtc_init_certificate(void *logctx, char *key_file,
-                            char *cert_file, char *key_buf,
-                            size_t key_buf_size, char *cert_buf,
-                            size_t cert_buf_size, char **fingerprint);
-int ff_rtc_dtls_open(void *logctx, AVFormatContext *s, URLContext **dtls_uc,
-                     URLContext *udp, char *ice_host, int ice_port, int pkt_size,
-                     char *cert_file, char *key_file,
-                     char *cert_buf, char *key_buf,
-                     int is_dtls_active);
+int ff_rtc_init_certificate(RTCContext *rtc);
+int ff_rtc_dtls_open(RTCContext *rtc);
+int ff_rtc_session_init(RTCContext *rtc);
+int ff_rtc_parse_answer(RTCContext *rtc);
+int ff_rtc_udp_connect(RTCContext *rtc);
+int ff_rtc_ice_handle_binding_request(RTCContext *rtc, char *buf, int buf_size);
+int ff_rtc_ice_dtls_handshake(RTCContext *rtc);
+int ff_rtc_dtls_export_materials(RTCContext *rtc, char *send_key, char *recv_key);
+void ff_rtc_session_deinit(RTCContext *rtc);
 #endif /* AVFORMAT_RTC_H */
