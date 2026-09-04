@@ -35,7 +35,6 @@
 #include "avc.h"
 #include "nal.h"
 #include "avio_internal.h"
-#include "http.h"
 #include "internal.h"
 #include "mux.h"
 #include "network.h"
@@ -463,123 +462,6 @@ end:
 }
 
 /**
- * Exchange SDP offer with WebRTC peer to get the answer.
- *
- * @return 0 if OK, AVERROR_xxx on error
- */
-static int exchange_sdp(AVFormatContext *s)
-{
-    int ret;
-    char buf[MAX_URL_SIZE];
-    AVBPrint bp;
-    WHIPContext *whip = s->priv_data;
-    RTCContext *rtc = &whip->rtc;
-    /* The URL context is an HTTP transport layer for the WHIP protocol. */
-    URLContext *whip_uc = NULL;
-    AVDictionary *opts = NULL;
-    char *hex_data = NULL;
-    const char *proto_name = avio_find_protocol_name(s->url);
-
-    /* To prevent a crash during cleanup, always initialize it. */
-    av_bprint_init(&bp, 1, RTC_MAX_SDP_SIZE);
-
-    if (!av_strstart(proto_name, "http", NULL)) {
-        av_log(whip, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose http, url is %s\n",
-            proto_name, s->url);
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    if (!rtc->sdp_offer || !strlen(rtc->sdp_offer)) {
-        av_log(whip, AV_LOG_ERROR, "No offer to exchange\n");
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    ret = snprintf(buf, sizeof(buf), "Cache-Control: no-cache\r\nContent-Type: application/sdp\r\n");
-    if (rtc->authorization)
-        ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", rtc->authorization);
-    if (ret <= 0 || ret >= sizeof(buf)) {
-        av_log(whip, AV_LOG_ERROR, "Failed to generate headers, size=%d, %s\n", ret, buf);
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    av_dict_set(&opts, "headers", buf, 0);
-    av_dict_set_int(&opts, "chunked_post", 0, 0);
-
-    if (rtc->timeout >= 0)
-        av_dict_set_int(&opts, "timeout", rtc->timeout, 0);
-
-    hex_data = av_mallocz(2 * strlen(rtc->sdp_offer) + 1);
-    if (!hex_data) {
-        ret = AVERROR(ENOMEM);
-        goto end;
-    }
-    ff_data_to_hex(hex_data, rtc->sdp_offer, strlen(rtc->sdp_offer), 0);
-    av_dict_set(&opts, "post_data", hex_data, 0);
-
-    ret = ffurl_open_whitelist(&whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
-        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
-    if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "Failed to request url=%s, offer: %s\n", s->url, rtc->sdp_offer);
-        goto end;
-    }
-
-    if (ff_http_get_new_location(whip_uc)) {
-        rtc->resource_url = av_strdup(ff_http_get_new_location(whip_uc));
-        if (!rtc->resource_url) {
-            ret = AVERROR(ENOMEM);
-            goto end;
-        }
-    }
-
-    while (1) {
-        ret = ffurl_read(whip_uc, buf, sizeof(buf));
-        if (ret == AVERROR_EOF) {
-            /* Reset the error because we read all response as answer util EOF. */
-            ret = 0;
-            break;
-        }
-        if (ret <= 0) {
-            av_log(whip, AV_LOG_ERROR, "Failed to read response from url=%s, offer is %s, answer is %s\n",
-                s->url, rtc->sdp_offer, rtc->sdp_answer);
-            goto end;
-        }
-
-        av_bprintf(&bp, "%.*s", ret, buf);
-        if (!av_bprint_is_complete(&bp)) {
-            av_log(whip, AV_LOG_ERROR, "Answer exceed max size %d, %.*s, %s\n", RTC_MAX_SDP_SIZE, ret, buf, bp.str);
-            ret = AVERROR(EIO);
-            goto end;
-        }
-    }
-
-    if (!av_strstart(bp.str, "v=", NULL)) {
-        av_log(whip, AV_LOG_ERROR, "Invalid answer: %s\n", bp.str);
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    rtc->sdp_answer = av_strdup(bp.str);
-    if (!rtc->sdp_answer) {
-        ret = AVERROR(ENOMEM);
-        goto end;
-    }
-
-    if (rtc->state < RTC_STATE_ANSWER)
-        rtc->state = RTC_STATE_ANSWER;
-    av_log(whip, AV_LOG_VERBOSE, "Got state=%d, answer: %s\n", rtc->state, rtc->sdp_answer);
-
-end:
-    ffurl_closep(&whip_uc);
-    av_bprint_finalize(&bp, NULL);
-    av_dict_free(&opts);
-    av_freep(&hex_data);
-    return ret;
-}
-
-/**
  * Establish the SRTP context using the keying material exported from DTLS.
  *
  * Create separate SRTP contexts for sending video and audio, as their sequences differ
@@ -874,69 +756,6 @@ end:
 }
 
 /**
- * RTC is connectionless, for it's based on UDP, so it check whether sesison is
- * timeout. In such case, publishers can't republish the stream util the session
- * is timeout.
- * This function is called to notify the server that the stream is ended, server
- * should expire and close the session immediately, so that publishers can republish
- * the stream quickly.
- */
-static int dispose_session(AVFormatContext *s)
-{
-    int ret;
-    char buf[MAX_URL_SIZE];
-    URLContext *whip_uc = NULL;
-    AVDictionary *opts = NULL;
-    WHIPContext *whip = s->priv_data;
-    RTCContext *rtc = &whip->rtc;
-
-    if (!rtc->resource_url)
-        return 0;
-
-    ret = snprintf(buf, sizeof(buf), "Cache-Control: no-cache\r\n");
-    if (rtc->authorization)
-        ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", rtc->authorization);
-    if (ret <= 0 || ret >= sizeof(buf)) {
-        av_log(whip, AV_LOG_ERROR, "Failed to generate headers, size=%d, %s\n", ret, buf);
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-
-    av_dict_set(&opts, "headers", buf, 0);
-    av_dict_set_int(&opts, "chunked_post", 0, 0);
-    av_dict_set(&opts, "method", "DELETE", 0);
-
-    if (rtc->timeout >= 0)
-        av_dict_set_int(&opts, "timeout", rtc->timeout, 0);
-
-    ret = ffurl_open_whitelist(&whip_uc, rtc->resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
-        &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
-    if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "Failed to DELETE url=%s\n", rtc->resource_url);
-        goto end;
-    }
-
-    while (1) {
-        ret = ffurl_read(whip_uc, buf, sizeof(buf));
-        if (ret == AVERROR_EOF) {
-            ret = 0;
-            break;
-        }
-        if (ret < 0) {
-            av_log(whip, AV_LOG_ERROR, "Failed to read response from DELETE url=%s\n", rtc->resource_url);
-            goto end;
-        }
-    }
-
-    av_log(whip, AV_LOG_INFO, "Dispose resource %s ok\n", rtc->resource_url);
-
-end:
-    ffurl_closep(&whip_uc);
-    av_dict_free(&opts);
-    return ret;
-}
-
-/**
  * Since the h264_mp4toannexb filter only processes the MP4 ISOM format and bypasses
  * the annexb format, it is necessary to manually insert encoder metadata before each
  * IDR when dealing with annexb format packets. For instance, in the case of H.264,
@@ -1032,7 +851,7 @@ static av_cold int whip_init(AVFormatContext *s)
     if ((ret = generate_sdp_offer(s)) < 0)
         goto end;
 
-    if ((ret = exchange_sdp(s)) < 0)
+    if ((ret = ff_rtc_exchange_sdp(rtc)) < 0)
         goto end;
 
     if ((ret = ff_rtc_parse_answer(rtc)) < 0)
@@ -1298,7 +1117,7 @@ static av_cold void whip_deinit(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     RTCContext *rtc = &whip->rtc;
 
-    ret = dispose_session(s);
+    ret = ff_rtc_dispose_session(rtc);
     if (ret < 0)
         av_log(whip, AV_LOG_WARNING, "Failed to dispose resource, ret=%d\n", ret);
 

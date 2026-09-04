@@ -250,5 +250,7 @@ int ff_rtc_parse_answer(RTCContext *rtc);
 int ff_rtc_udp_connect(RTCContext *rtc);
 int ff_rtc_ice_handle_binding_request(RTCContext *rtc, char *buf, int buf_size);
 int ff_rtc_ice_dtls_handshake(RTCContext *rtc);
+int ff_rtc_exchange_sdp(RTCContext *rtc);
+int ff_rtc_dispose_session(RTCContext *rtc);
 void ff_rtc_deinit(RTCContext *rtc);
 #endif /* AVFORMAT_RTC_H */

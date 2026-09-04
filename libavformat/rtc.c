@@ -20,6 +20,8 @@
  */
 
 #include "libavutil/attributes_internal.h"
+#include "libavutil/avstring.h"
+#include "libavutil/bprint.h"
 #include "libavutil/crc.h"
 #include "libavutil/hmac.h"
 #include "libavutil/intreadwrite.h"
@@ -29,6 +31,7 @@
 #include "libavutil/time.h"
 
 #include "avio_internal.h"
+#include "http.h"
 #include "internal.h"
 #include "network.h"
 #include "rtc.h"
@@ -677,6 +680,182 @@ next_packet:
     }
 
 end:
+    return ret;
+}
+
+/**
+ * Exchange SDP offer with WebRTC peer to get the answer.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+int ff_rtc_exchange_sdp(RTCContext *rtc)
+{
+    int ret;
+    char buf[MAX_URL_SIZE];
+    AVBPrint bp;
+    /* The URL context is an HTTP transport layer for the RTC session. */
+    URLContext *uc = NULL;
+    AVDictionary *opts = NULL;
+    char *hex_data = NULL;
+    const char *proto_name = avio_find_protocol_name(rtc->ctx->url);
+
+    /* To prevent a crash during cleanup, always initialize it. */
+    av_bprint_init(&bp, 1, RTC_MAX_SDP_SIZE);
+
+    if (!av_strstart(proto_name, "http", NULL)) {
+        av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Protocol %s is not supported by RTC, choose http, url is %s\n",
+            proto_name, rtc->ctx->url);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    if (!rtc->sdp_offer || !strlen(rtc->sdp_offer)) {
+        av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "No offer to exchange\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    ret = snprintf(buf, sizeof(buf), "Cache-Control: no-cache\r\nContent-Type: application/sdp\r\n");
+    if (rtc->authorization)
+        ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", rtc->authorization);
+    if (ret <= 0 || ret >= sizeof(buf)) {
+        av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to generate headers, size=%d, %s\n", ret, buf);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    av_dict_set(&opts, "headers", buf, 0);
+    av_dict_set_int(&opts, "chunked_post", 0, 0);
+
+    if (rtc->timeout >= 0)
+        av_dict_set_int(&opts, "timeout", rtc->timeout, 0);
+
+    hex_data = av_mallocz(2 * strlen(rtc->sdp_offer) + 1);
+    if (!hex_data) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+    ff_data_to_hex(hex_data, rtc->sdp_offer, strlen(rtc->sdp_offer), 0);
+    av_dict_set(&opts, "post_data", hex_data, 0);
+
+    ret = ffurl_open_whitelist(&uc, rtc->ctx->url, AVIO_FLAG_READ_WRITE, &rtc->ctx->interrupt_callback,
+        &opts, rtc->ctx->protocol_whitelist, rtc->ctx->protocol_blacklist, NULL);
+    if (ret < 0) {
+        av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to request url=%s, offer: %s\n", rtc->ctx->url, rtc->sdp_offer);
+        goto end;
+    }
+
+    if (ff_http_get_new_location(uc)) {
+        rtc->resource_url = av_strdup(ff_http_get_new_location(uc));
+        if (!rtc->resource_url) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+    }
+
+    while (1) {
+        ret = ffurl_read(uc, buf, sizeof(buf));
+        if (ret == AVERROR_EOF) {
+            /* Reset the error because we read all response as answer util EOF. */
+            ret = 0;
+            break;
+        }
+        if (ret <= 0) {
+            av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to read response from url=%s, offer is %s, answer is %s\n",
+                rtc->ctx->url, rtc->sdp_offer, rtc->sdp_answer);
+            goto end;
+        }
+
+        av_bprintf(&bp, "%.*s", ret, buf);
+        if (!av_bprint_is_complete(&bp)) {
+            av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Answer exceed max size %d, %.*s, %s\n", RTC_MAX_SDP_SIZE, ret, buf, bp.str);
+            ret = AVERROR(EIO);
+            goto end;
+        }
+    }
+
+    if (!av_strstart(bp.str, "v=", NULL)) {
+        av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Invalid answer: %s\n", bp.str);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    rtc->sdp_answer = av_strdup(bp.str);
+    if (!rtc->sdp_answer) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    if (rtc->state < RTC_STATE_ANSWER)
+        rtc->state = RTC_STATE_ANSWER;
+    av_log(rtc->ctx->priv_data, AV_LOG_VERBOSE, "Got state=%d, answer: %s\n", rtc->state, rtc->sdp_answer);
+
+end:
+    ffurl_closep(&uc);
+    av_bprint_finalize(&bp, NULL);
+    av_dict_free(&opts);
+    av_freep(&hex_data);
+    return ret;
+}
+
+/**
+ * RTC is connectionless, for it's based on UDP, so it check whether sesison is
+ * timeout. In such case, publishers can't republish the stream util the session
+ * is timeout.
+ * This function is called to notify the server that the stream is ended, server
+ * should expire and close the session immediately, so that publishers can republish
+ * the stream quickly.
+ */
+int ff_rtc_dispose_session(RTCContext *rtc)
+{
+    int ret;
+    char buf[MAX_URL_SIZE];
+    URLContext *uc = NULL;
+    AVDictionary *opts = NULL;
+
+    if (!rtc->resource_url)
+        return 0;
+
+    ret = snprintf(buf, sizeof(buf), "Cache-Control: no-cache\r\n");
+    if (rtc->authorization)
+        ret += snprintf(buf + ret, sizeof(buf) - ret, "Authorization: Bearer %s\r\n", rtc->authorization);
+    if (ret <= 0 || ret >= sizeof(buf)) {
+        av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to generate headers, size=%d, %s\n", ret, buf);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+
+    av_dict_set(&opts, "headers", buf, 0);
+    av_dict_set_int(&opts, "chunked_post", 0, 0);
+    av_dict_set(&opts, "method", "DELETE", 0);
+
+    if (rtc->timeout >= 0)
+        av_dict_set_int(&opts, "timeout", rtc->timeout, 0);
+
+    ret = ffurl_open_whitelist(&uc, rtc->resource_url, AVIO_FLAG_READ_WRITE, &rtc->ctx->interrupt_callback,
+        &opts, rtc->ctx->protocol_whitelist, rtc->ctx->protocol_blacklist, NULL);
+    if (ret < 0) {
+        av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to DELETE url=%s\n", rtc->resource_url);
+        goto end;
+    }
+
+    while (1) {
+        ret = ffurl_read(uc, buf, sizeof(buf));
+        if (ret == AVERROR_EOF) {
+            ret = 0;
+            break;
+        }
+        if (ret < 0) {
+            av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to read response from DELETE url=%s\n", rtc->resource_url);
+            goto end;
+        }
+    }
+
+    av_log(rtc->ctx->priv_data, AV_LOG_INFO, "Dispose resource %s ok\n", rtc->resource_url);
+
+end:
+    ffurl_closep(&uc);
+    av_dict_free(&opts);
     return ret;
 }
 
