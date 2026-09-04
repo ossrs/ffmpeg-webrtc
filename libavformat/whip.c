@@ -125,9 +125,6 @@ typedef struct WHIPContext {
     RtpHistoryItem *hist;
     uint8_t *hist_pool;
     int hist_head;
-
-    /* The resource URL returned in the Location header of the WHIP HTTP response. */
-    char *resource_url;
 } WHIPContext;
 
 /**
@@ -140,9 +137,9 @@ static av_cold int initialize(AVFormatContext *s)
     RTCContext *rtc = &whip->rtc;
 
     rtc->ctx = s;
-    rtc->start_time = av_gettime_relative();
+    rtc->starttime = av_gettime_relative();
 
-    if ((ret = ff_rtc_session_init(rtc)) < 0)
+    if ((ret = ff_rtc_initialize(rtc)) < 0)
         return ret;
 
     whip->audio_first_seq = av_lfg_get(&rtc->rnd) & 0x0fff;
@@ -319,7 +316,7 @@ static int generate_sdp_offer(AVFormatContext *s)
     /* To prevent a crash during cleanup, always initialize it. */
     av_bprint_init(&bp, 1, RTC_MAX_SDP_SIZE);
 
-    if (rtc->local_sdp) {
+    if (rtc->sdp_offer) {
         av_log(whip, AV_LOG_ERROR, "SDP offer is already set\n");
         ret = AVERROR(EINVAL);
         goto end;
@@ -382,7 +379,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             whip->audio_payload_type,
             rtc->ice_ufrag_local,
             rtc->ice_pwd_local,
-            rtc->local_fingerprint,
+            rtc->dtls_fingerprint,
             is_dtls_active ? "active" : "passive",
             whip->audio_payload_type,
             acodec_name,
@@ -425,7 +422,7 @@ static int generate_sdp_offer(AVFormatContext *s)
             whip->video_rtx_payload_type,
             rtc->ice_ufrag_local,
             rtc->ice_pwd_local,
-            rtc->local_fingerprint,
+            rtc->dtls_fingerprint,
             is_dtls_active ? "active" : "passive",
             whip->video_payload_type,
             vcodec_name,
@@ -449,16 +446,16 @@ static int generate_sdp_offer(AVFormatContext *s)
         goto end;
     }
 
-    rtc->local_sdp = av_strdup(bp.str);
-    if (!rtc->local_sdp) {
+    rtc->sdp_offer = av_strdup(bp.str);
+    if (!rtc->sdp_offer) {
         ret = AVERROR(ENOMEM);
         goto end;
     }
 
-    if (rtc->state < RTC_STATE_LOCAL_SDP_READY)
-        rtc->state = RTC_STATE_LOCAL_SDP_READY;
+    if (rtc->state < RTC_STATE_OFFER)
+        rtc->state = RTC_STATE_OFFER;
     rtc->offer_time = av_gettime_relative();
-    av_log(whip, AV_LOG_VERBOSE, "Generated state=%d, offer: %s\n", rtc->state, rtc->local_sdp);
+    av_log(whip, AV_LOG_VERBOSE, "Generated state=%d, offer: %s\n", rtc->state, rtc->sdp_offer);
 
 end:
     av_bprint_finalize(&bp, NULL);
@@ -493,7 +490,7 @@ static int exchange_sdp(AVFormatContext *s)
         goto end;
     }
 
-    if (!rtc->local_sdp || !strlen(rtc->local_sdp)) {
+    if (!rtc->sdp_offer || !strlen(rtc->sdp_offer)) {
         av_log(whip, AV_LOG_ERROR, "No offer to exchange\n");
         ret = AVERROR(EINVAL);
         goto end;
@@ -514,24 +511,24 @@ static int exchange_sdp(AVFormatContext *s)
     if (rtc->timeout >= 0)
         av_dict_set_int(&opts, "timeout", rtc->timeout, 0);
 
-    hex_data = av_mallocz(2 * strlen(rtc->local_sdp) + 1);
+    hex_data = av_mallocz(2 * strlen(rtc->sdp_offer) + 1);
     if (!hex_data) {
         ret = AVERROR(ENOMEM);
         goto end;
     }
-    ff_data_to_hex(hex_data, rtc->local_sdp, strlen(rtc->local_sdp), 0);
+    ff_data_to_hex(hex_data, rtc->sdp_offer, strlen(rtc->sdp_offer), 0);
     av_dict_set(&opts, "post_data", hex_data, 0);
 
     ret = ffurl_open_whitelist(&whip_uc, s->url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
         &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "Failed to request url=%s, offer: %s\n", s->url, rtc->local_sdp);
+        av_log(whip, AV_LOG_ERROR, "Failed to request url=%s, offer: %s\n", s->url, rtc->sdp_offer);
         goto end;
     }
 
     if (ff_http_get_new_location(whip_uc)) {
-        whip->resource_url = av_strdup(ff_http_get_new_location(whip_uc));
-        if (!whip->resource_url) {
+        rtc->resource_url = av_strdup(ff_http_get_new_location(whip_uc));
+        if (!rtc->resource_url) {
             ret = AVERROR(ENOMEM);
             goto end;
         }
@@ -546,7 +543,7 @@ static int exchange_sdp(AVFormatContext *s)
         }
         if (ret <= 0) {
             av_log(whip, AV_LOG_ERROR, "Failed to read response from url=%s, offer is %s, answer is %s\n",
-                s->url, rtc->local_sdp, rtc->remote_sdp);
+                s->url, rtc->sdp_offer, rtc->sdp_answer);
             goto end;
         }
 
@@ -564,15 +561,15 @@ static int exchange_sdp(AVFormatContext *s)
         goto end;
     }
 
-    rtc->remote_sdp = av_strdup(bp.str);
-    if (!rtc->remote_sdp) {
+    rtc->sdp_answer = av_strdup(bp.str);
+    if (!rtc->sdp_answer) {
         ret = AVERROR(ENOMEM);
         goto end;
     }
 
-    if (rtc->state < RTC_STATE_REMOTE_SDP_RECEIVED)
-        rtc->state = RTC_STATE_REMOTE_SDP_RECEIVED;
-    av_log(whip, AV_LOG_VERBOSE, "Got state=%d, answer: %s\n", rtc->state, rtc->remote_sdp);
+    if (rtc->state < RTC_STATE_ANSWER)
+        rtc->state = RTC_STATE_ANSWER;
+    av_log(whip, AV_LOG_VERBOSE, "Got state=%d, answer: %s\n", rtc->state, rtc->sdp_answer);
 
 end:
     ffurl_closep(&whip_uc);
@@ -604,9 +601,29 @@ static int setup_srtp(AVFormatContext *s)
     const char* suite = "SRTP_AES128_CM_HMAC_SHA1_80";
     WHIPContext *whip = s->priv_data;
     RTCContext *rtc = &whip->rtc;
+    int is_dtls_active = rtc->flags & RTC_DTLS_ACTIVE;
+    char *cp = is_dtls_active ? send_key : recv_key;
+    char *sp = is_dtls_active ? recv_key : send_key;
 
-    if ((ret = ff_rtc_dtls_export_materials(rtc, send_key, recv_key)) < 0)
+    ret = ff_dtls_export_materials(rtc->dtls_uc, rtc->dtls_srtp_materials, sizeof(rtc->dtls_srtp_materials));
+    if (ret < 0)
         goto end;
+    /**
+     * This represents the material used to build the SRTP master key. It is
+     * generated by DTLS and has the following layout:
+     *          16B         16B         14B             14B
+     *      client_key | server_key | client_salt | server_salt
+     */
+    char *client_key = rtc->dtls_srtp_materials;
+    char *server_key = rtc->dtls_srtp_materials + RTC_DTLS_SRTP_KEY_LEN;
+    char *client_salt = server_key + RTC_DTLS_SRTP_KEY_LEN;
+    char *server_salt = client_salt + RTC_DTLS_SRTP_SALT_LEN;
+
+    memcpy(cp, client_key, RTC_DTLS_SRTP_KEY_LEN);
+    memcpy(cp + RTC_DTLS_SRTP_KEY_LEN, client_salt, RTC_DTLS_SRTP_SALT_LEN);
+
+    memcpy(sp, server_key, RTC_DTLS_SRTP_KEY_LEN);
+    memcpy(sp + RTC_DTLS_SRTP_KEY_LEN, server_salt, RTC_DTLS_SRTP_SALT_LEN);
 
     /* Setup SRTP context for outgoing packets */
     if (!av_base64_encode(buf, sizeof(buf), send_key, sizeof(send_key))) {
@@ -652,11 +669,11 @@ static int setup_srtp(AVFormatContext *s)
         goto end;
     }
 
-    if (rtc->state < RTC_STATE_SRTP_READY)
-        rtc->state = RTC_STATE_SRTP_READY;
+    if (rtc->state < RTC_STATE_SRTP_FINISHED)
+        rtc->state = RTC_STATE_SRTP_FINISHED;
     rtc->srtp_time = av_gettime_relative();
     av_log(whip, AV_LOG_VERBOSE, "SRTP setup done, state=%d, suite=%s, key=%zuB, elapsed=%.2fms\n",
-        rtc->state, suite, sizeof(send_key), RTC_ELAPSED(rtc->start_time, av_gettime_relative()));
+        rtc->state, suite, sizeof(send_key), RTC_ELAPSED(rtc->starttime, av_gettime_relative()));
 
 end:
     return ret;
@@ -702,11 +719,11 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
     SRTPContext *srtp;
 
     /* Ignore if not RTP or RTCP packet. */
-    if (!ff_rtc_is_rtp_or_rtcp(buf, buf_size))
+    if (!ff_rtc_media_is_rtp_rtcp(buf, buf_size))
         return 0;
 
     /* Only support audio, video and rtcp. */
-    is_rtcp = ff_rtc_is_rtcp(buf, buf_size);
+    is_rtcp = ff_rtc_media_is_rtcp(buf, buf_size);
     payload_type = buf[1] & 0x7f;
     is_video = payload_type == whip->video_payload_type;
     if (!is_rtcp && payload_type != whip->video_payload_type && payload_type != whip->audio_payload_type)
@@ -836,8 +853,8 @@ static int create_rtp_muxer(AVFormatContext *s)
         rtc->state = RTC_STATE_READY;
     av_log(whip, AV_LOG_INFO, "Muxer state=%d, buffer_size=%d, max_packet_size=%d, "
                            "elapsed=%.2fms(init:%.2f,offer:%.2f,answer:%.2f,udp:%.2f,ice:%.2f,dtls:%.2f,srtp:%.2f)\n",
-        rtc->state, buffer_size, max_packet_size, RTC_ELAPSED(rtc->start_time, av_gettime_relative()),
-        RTC_ELAPSED(rtc->start_time,   rtc->init_time),
+        rtc->state, buffer_size, max_packet_size, RTC_ELAPSED(rtc->starttime, av_gettime_relative()),
+        RTC_ELAPSED(rtc->starttime,   rtc->init_time),
         RTC_ELAPSED(rtc->init_time,   rtc->offer_time),
         RTC_ELAPSED(rtc->offer_time,  rtc->answer_time),
         RTC_ELAPSED(rtc->answer_time, rtc->udp_time),
@@ -873,7 +890,7 @@ static int dispose_session(AVFormatContext *s)
     WHIPContext *whip = s->priv_data;
     RTCContext *rtc = &whip->rtc;
 
-    if (!whip->resource_url)
+    if (!rtc->resource_url)
         return 0;
 
     ret = snprintf(buf, sizeof(buf), "Cache-Control: no-cache\r\n");
@@ -892,10 +909,10 @@ static int dispose_session(AVFormatContext *s)
     if (rtc->timeout >= 0)
         av_dict_set_int(&opts, "timeout", rtc->timeout, 0);
 
-    ret = ffurl_open_whitelist(&whip_uc, whip->resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
+    ret = ffurl_open_whitelist(&whip_uc, rtc->resource_url, AVIO_FLAG_READ_WRITE, &s->interrupt_callback,
         &opts, s->protocol_whitelist, s->protocol_blacklist, NULL);
     if (ret < 0) {
-        av_log(whip, AV_LOG_ERROR, "Failed to DELETE url=%s\n", whip->resource_url);
+        av_log(whip, AV_LOG_ERROR, "Failed to DELETE url=%s\n", rtc->resource_url);
         goto end;
     }
 
@@ -906,12 +923,12 @@ static int dispose_session(AVFormatContext *s)
             break;
         }
         if (ret < 0) {
-            av_log(whip, AV_LOG_ERROR, "Failed to read response from DELETE url=%s\n", whip->resource_url);
+            av_log(whip, AV_LOG_ERROR, "Failed to read response from DELETE url=%s\n", rtc->resource_url);
             goto end;
         }
     }
 
-    av_log(whip, AV_LOG_INFO, "Dispose resource %s ok\n", whip->resource_url);
+    av_log(whip, AV_LOG_INFO, "Dispose resource %s ok\n", rtc->resource_url);
 
 end:
     ffurl_closep(&whip_uc);
@@ -1188,7 +1205,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
      */
     if (now - rtc->last_consent_tx_time > WHIP_ICE_CONSENT_CHECK_INTERVAL * RTC_US_PER_MS) {
         int size;
-        ret = ff_rtc_ice_create_binding_request(&whip->rtc, rtc->buf, sizeof(rtc->buf),
+        ret = ff_rtc_ice_create_request(&whip->rtc, rtc->buf, sizeof(rtc->buf),
                                                 &size);
         if (ret < 0) {
             av_log(whip, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
@@ -1223,12 +1240,12 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
         av_log(whip, AV_LOG_DEBUG, "Consent Freshness check received\n");
     }
     if (ff_is_dtls_packet(rtc->buf, ret)) {
-        if ((ret = ffurl_write(rtc->dtls, rtc->buf, ret)) < 0) {
+        if ((ret = ffurl_write(rtc->dtls_uc, rtc->buf, ret)) < 0) {
             av_log(whip, AV_LOG_ERROR, "Failed to handle DTLS message\n");
             goto end;
         }
     }
-    if (ff_rtc_is_rtcp(rtc->buf, ret)) {
+    if (ff_rtc_media_is_rtcp(rtc->buf, ret)) {
         uint8_t fmt = rtc->buf[0] & 0x1f;
         uint8_t pt = rtc->buf[1];
         /**
@@ -1304,13 +1321,12 @@ static av_cold void whip_deinit(AVFormatContext *s)
 
     av_freep(&whip->hist_pool);
     av_freep(&whip->hist);
-    av_freep(&whip->resource_url);
     ff_srtp_free(&whip->srtp_audio_send);
     ff_srtp_free(&whip->srtp_video_send);
     ff_srtp_free(&whip->srtp_video_rtx_send);
     ff_srtp_free(&whip->srtp_rtcp_send);
     ff_srtp_free(&whip->srtp_recv);
-    ff_rtc_session_deinit(rtc);
+    ff_rtc_deinit(rtc);
 }
 
 static int whip_check_bitstream(AVFormatContext *s, AVStream *st, const AVPacket *pkt)
@@ -1339,7 +1355,7 @@ static const AVOption options[] = {
     { "handshake_timeout",  "Timeout in milliseconds for ICE and DTLS handshake.",      RTC_OFFSET(handshake_timeout),  AV_OPT_TYPE_INT,    { .i64 = 5000 },    -1, INT_MAX, ENC },
     { "timeout",            "Set timeout for socket I/O operations",                    RTC_OFFSET(timeout),            AV_OPT_TYPE_DURATION, { .i64 = -1 }, -1, INT_MAX, ENC },
     { "pkt_size",           "The maximum size, in bytes, of RTP packets that send out", RTC_OFFSET(pkt_size),           AV_OPT_TYPE_INT,    { .i64 = 1200 },    -1, INT_MAX, ENC },
-    { "ts_buffer_size",     "The buffer size, in bytes, of underlying protocol",        RTC_OFFSET(buffer_size),        AV_OPT_TYPE_INT,    { .i64 = -1 },      -1, INT_MAX, ENC },
+    { "ts_buffer_size",     "The buffer size, in bytes, of underlying protocol",        RTC_OFFSET(ts_buffer_size),        AV_OPT_TYPE_INT,    { .i64 = -1 },      -1, INT_MAX, ENC },
     { "whip_flags",         "Set flags affecting WHIP connection behavior",             RTC_OFFSET(flags),              AV_OPT_TYPE_FLAGS,  { .i64 = 0},         0, UINT_MAX, ENC, .unit = "flags" },
     { "dtls_active",        "Set dtls role as active",                                  0,                          AV_OPT_TYPE_CONST,  { .i64 = RTC_DTLS_ACTIVE}, 0, UINT_MAX, ENC, .unit = "flags" },
     { "rtp_history",        "The number of RTP history items to store",                 OFFSET(hist_sz),            AV_OPT_TYPE_INT,    { .i64 = WHIP_RTP_HISTORY_DEFAULT }, WHIP_RTP_HISTORY_MIN, WHIP_RTP_HISTORY_MAX, ENC },
