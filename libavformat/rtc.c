@@ -28,15 +28,36 @@
 #include "libavutil/avstring.h"
 #include "libavutil/random_seed.h"
 #include "libavutil/mem.h"
+#include "libavutil/time.h"
 #include "libavcodec/startcode.h"
 
 #include "nal.h"
 #include "avc.h"
 #include "avio_internal.h"
 #include "internal.h"
+#include "mux.h"
 #include "network.h"
 #include "tls.h"
+#include "srtp.h"
 #include "rtc.h"
+
+/**
+ * If we try to read from UDP and get EAGAIN, we sleep for 5ms and retry up to 10 times.
+ * This will limit the total duration (in milliseconds, 50ms)
+ */
+#define RTC_ICE_DTLS_READ_MAX_RETRY 10
+#define RTC_ICE_DTLS_READ_SLEEP_DURATION 5
+
+/**
+ * Refer to RFC 7675 5.1,
+ *
+ * To prevent expiry of consent, a STUN binding request can be sent periodically.
+ * Implementations SHOULD set a default interval of 5 seconds(5000ms).
+ *
+ * Consent expires after 30 seconds(30000ms).
+ */
+#define RTC_ICE_CONSENT_CHECK_INTERVAL 5000
+#define RTC_ICE_CONSENT_EXPIRED_TIMER 30000
 
 
 /* The magic cookie for Session Traversal Utilities for NAT (STUN) messages. */
@@ -486,11 +507,63 @@ end:
     return ret;
 }
 
+/**
+ * This function handles incoming binding request messages by responding to them.
+ * If the message is not a binding request, it will be ignored.
+ */
+static int rtc_ice_handle_binding_request(RTCContext *rtc, char *buf, int buf_size)
+{
+    int ret = 0, size;
+    char tid[12];
+
+    /* Ignore if not a binding request. */
+    if (!ff_rtc_ice_is_binding_request(buf, buf_size))
+        return ret;
+
+    if (buf_size < RTC_STUN_HEADER_SIZE) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Invalid STUN message, expected at least %d, got %d\n",
+            RTC_STUN_HEADER_SIZE, buf_size);
+        return AVERROR(EINVAL);
+    }
+
+    /* Parse transaction id from binding request in buf. */
+    memcpy(tid, buf + 8, 12);
+
+    /* Build the STUN binding response. */
+    ret = ff_rtc_ice_create_binding_response(rtc, tid, sizeof(tid), rtc->buf,
+                                             sizeof(rtc->buf), &size);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to create STUN binding response, size=%d\n", size);
+        return ret;
+    }
+
+    ret = ffurl_write(rtc->udp, rtc->buf, size);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to send STUN binding response, size=%d\n", size);
+        return ret;
+    }
+
+    return 0;
+}
+
 
 int rtc_init(RTCContext *rtc) {
 
     uint32_t seed;
     int ret, ideal_pkt_size = 532;
+
+    rtc->rtc_starttime = av_gettime_relative();
+
+    rtc->hist = av_calloc(rtc->hist_sz, sizeof(*rtc->hist));
+    if (!rtc->hist)
+        return AVERROR(ENOMEM);
+
+    rtc->hist_pool = av_calloc(rtc->hist_sz, rtc->pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN);
+    if (!rtc->hist_pool)
+        return AVERROR(ENOMEM);
+
+    for (int i = 0; i < rtc->hist_sz; i++)
+        rtc->hist[i].buf = rtc->hist_pool + i * (rtc->pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN);
 
     /**
     * Get or Generate a self-signed certificate and private key for DTLS,
@@ -805,7 +878,104 @@ end:
     return ret;
 }
 
-int ff_rtc_udp_connect(RTCContext *rtc)
+static int rtp_history_store(RTCContext *rtc, const uint8_t *buf, int size)
+{
+    uint16_t seq = AV_RB16(buf + 2);
+    uint32_t pos = ((uint32_t)seq - (uint32_t)rtc->video_first_seq) % (uint32_t)rtc->hist_sz;
+    RTC_RtpHistoryItem *it = &rtc->hist[pos];
+    if (size > rtc->pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN)
+        return AVERROR_INVALIDDATA;
+    memcpy(it->buf, buf, size);
+    it->size = size;
+    it->seq = seq;
+
+    rtc->hist_head = ++pos;
+    return 0;
+}
+
+static const RTC_RtpHistoryItem *rtp_history_find(RTCContext *rtc, uint16_t seq)
+{
+    uint32_t pos = ((uint32_t)seq - (uint32_t)rtc->video_first_seq) % (uint32_t)rtc->hist_sz;
+    const RTC_RtpHistoryItem *it = &rtc->hist[pos];
+    return it->seq == seq ? it : NULL;
+}
+
+
+/**
+ * Callback triggered by the RTP muxer when it creates and sends out an RTP packet.
+ *
+ * This function modifies the video STAP packet, removing the markers, and updating the
+ * NRI of the first NALU. Additionally, it uses the corresponding SRTP context to encrypt
+ * the RTP packet, where the video packet is handled by the video SRTP context.
+ */
+static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
+{
+    int ret, cipher_size, is_rtcp, is_video;
+    uint8_t payload_type;
+    AVFormatContext *s = opaque;
+    SRTPContext *srtp;
+
+    /* Ignore if not RTP or RTCP packet. */
+    if (!ff_rtc_is_rtp_or_rtcp(buf, buf_size))
+        return 0;
+
+    /* Only support audio, video and rtcp. */
+    is_rtcp = ff_rtc_is_rtcp(buf, buf_size);
+    payload_type = buf[1] & 0x7f;
+    is_video = payload_type == rtc->video_payload_type;
+    if (!is_rtcp && payload_type != rtc->video_payload_type && payload_type != rtc->audio_payload_type)
+        return 0;
+
+    /* Get the corresponding SRTP context. */
+    srtp = is_rtcp ? &rtc->srtp_rtcp_send : (is_video? &rtc->srtp_video_send : &rtc->srtp_audio_send);
+
+    /* Encrypt by SRTP and send out. */
+    cipher_size = ff_srtp_encrypt(srtp, buf, buf_size, rtc->buf, sizeof(rtc->buf));
+    if (cipher_size <= 0 || cipher_size < buf_size) {
+        av_log(rtc->ctx, AV_LOG_WARNING, "Failed to encrypt packet=%dB, cipher=%dB\n", buf_size, cipher_size);
+        return 0;
+    }
+
+    if (is_video) {
+        ret = rtp_history_store(rtc, buf, buf_size);
+        if (ret < 0)
+            return ret;
+    }
+
+    ret = ffurl_write(rtc->udp, rtc->buf, cipher_size);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to write packet=%dB, ret=%d\n", cipher_size, ret);
+        return ret;
+    }
+
+    return ret;
+}
+
+int rtc_setup(RTCContext *rtc)
+{   
+    int ret = 0;
+    if ((ret = ff_rtc_udp_connect(rtc)) < 0)
+        goto end;
+
+    if ((ret = rtc_ice_dtls_handshake(rtc, 0)) < 0) // taking 0 for now , later we will take from whip
+        goto end;
+
+    if ((ret = setup_srtp(rtc)) < 0)
+        goto end;
+
+    if ((ret = create_rtp_muxer(rtc)) < 0)
+        goto end;
+
+end:
+    return ret;
+}
+
+/**
+ * To establish a connection with the UDP server, we utilize ICE-LITE in a Client-Server
+ * mode. In this setup, FFmpeg acts as the UDP client, while the peer functions as the
+ * UDP server.
+ */
+static int ff_rtc_udp_connect(RTCContext *rtc)
 {
     int ret = 0;
     char url[256];
@@ -830,7 +1000,339 @@ int ff_rtc_udp_connect(RTCContext *rtc)
     /* Make the socket non-blocking, set to READ and WRITE mode after connected */
     ff_socket_nonblock(ffurl_get_file_handle(rtc->udp), 1);
     rtc->udp->flags |= AVIO_FLAG_READ | AVIO_FLAG_NONBLOCK;
+
+    if (rtc->state < RTC_STATE_UDP_CONNECTED)
+        rtc->state = RTC_STATE_UDP_CONNECTED;
+    rtc->rtc_udp_time = av_gettime_relative();
+    av_log(rtc->ctx, AV_LOG_VERBOSE, "UDP state=%d, elapsed=%.2fms, connected to udp://%s:%d\n",
+        rtc->state, ELAPSED(rtc->rtc_starttime, av_gettime_relative()), rtc->ice_host, rtc->ice_port);
+
 end:
+    av_dict_free(&opts);
+    return ret;
+}
+
+int ff_rtc_ice_dtls_handshake(RTCContext *rtc, int is_dtls_active)
+{
+    int ret = 0, size, i;
+    int64_t starttime = av_gettime_relative(), now;
+
+    if (rtc->state < RTC_STATE_UDP_CONNECTED || !rtc->udp) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "UDP not connected, state=%d, udp=%p\n", rtc->state, rtc->udp);
+        return AVERROR(EINVAL);
+    }
+
+    while (1) {
+        if (rtc->state <= RTC_STATE_ICE_CONNECTING) {
+            /* Build the STUN binding request. */
+            ret = ff_rtc_ice_create_binding_request(&rtc, rtc->buf, sizeof(rtc->buf),
+                                                    &size);
+            if (ret < 0) {
+                av_log(rtc->ctx, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
+                goto end;
+            }
+
+            ret = ffurl_write(rtc->udp, rtc->buf, size);
+            if (ret < 0) {
+                av_log(rtc->ctx, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
+                goto end;
+            }
+
+            if (rtc->state < RTC_STATE_ICE_CONNECTING)
+                rtc->state = RTC_STATE_ICE_CONNECTING;
+        }
+
+next_packet:
+        if (rtc->state >= RTC_STATE_DTLS_FINISHED)
+            /* DTLS handshake is done, exit the loop. */
+            break;
+
+        now = av_gettime_relative();
+        if (now - starttime >= rtc->handshake_timeout * RTC_WHIP_US_PER_MS) {
+            av_log(rtc->ctx, AV_LOG_ERROR, "DTLS handshake timeout=%dms, cost=%.2fms, elapsed=%.2fms, state=%d\n",
+                rtc->handshake_timeout, ELAPSED(starttime, now), ELAPSED(rtc->rtc_starttime, now), rtc->state);
+            ret = AVERROR(ETIMEDOUT);
+            goto end;
+        }
+
+        /* Read the STUN or DTLS messages from peer. */
+        for (i = 0; i < RTC_ICE_DTLS_READ_MAX_RETRY; i++) {
+            if (rtc->state > RTC_STATE_ICE_CONNECTED)
+                break;
+            ret = ffurl_read(rtc->udp, rtc->buf, sizeof(rtc->buf));
+            if (ret > 0)
+                break;
+            if (ret == AVERROR(EAGAIN)) {
+                av_usleep(RTC_ICE_DTLS_READ_SLEEP_DURATION * RTC_WHIP_US_PER_MS);
+                continue;
+            }
+            if (is_dtls_active)
+                break;
+            av_log(rtc->ctx, AV_LOG_ERROR, "Failed to read message\n");
+            goto end;
+        }
+
+        /* Handle the ICE binding response. */
+        if (ff_rtc_ice_is_binding_response(rtc->buf, ret)) {
+            if (rtc->state < RTC_STATE_ICE_CONNECTED) {
+                if (rtc->is_peer_ice_lite)
+                    rtc->state = RTC_STATE_ICE_CONNECTED;
+            }
+            goto next_packet;
+        }
+
+        /* When a binding request is received, it is necessary to respond immediately. */
+        if (ff_rtc_ice_is_binding_request(rtc->buf, ret)) {
+            if ((ret = ice_handle_binding_request(rtc, rtc->buf, ret)) < 0)
+                goto end;
+            goto next_packet;
+        }
+
+        /* Handle DTLS handshake */
+        if (ff_is_dtls_packet(rtc->buf, ret) || is_dtls_active) {
+            rtc->rtc_ice_time = av_gettime_relative();
+            /* Start consent timer when ICE selected */
+            rtc->rtc_last_consent_tx_time = rtc->rtc_last_consent_rx_time = rtc->rtc_ice_time;
+            rtc->state = RTC_STATE_ICE_CONNECTED;
+            av_log(rtc->ctx, AV_LOG_VERBOSE, "ICE STUN ok, state=%d, url=udp://%s:%d, location=%s, username=%s:%s, res=%dB, elapsed=%.2fms\n",
+                whip->state, whip->rtc.ice_host, whip->rtc.ice_port, whip->whip_resource_url ? whip->whip_resource_url : "",
+                whip->rtc.ice_ufrag_remote, whip->rtc.ice_ufrag_local, ret, ELAPSED(rtc->rtc_starttime, rtc->rtc_ice_time));
+
+            ret = ff_rtc_dtls_open(&rtc, is_dtls_active);
+            if (ret < 0)
+                goto end;
+            ret = ffurl_handshake(rtc->dtls_uc);
+            if (ret < 0) {
+                rtc->state = RTC_STATE_FAILED;
+                av_log(whip, AV_LOG_ERROR, "DTLS session failed\n");
+                goto end;
+            }
+            if (!ret) {
+                rtc->state = RTC_STATE_DTLS_FINISHED;
+                rtc->rtc_dtls_time = av_gettime_relative();
+                av_log(whip, AV_LOG_VERBOSE, "DTLS handshake is done, elapsed=%.2fms\n",
+                    ELAPSED(rtc->rtc_starttime, rtc->rtc_dtls_time));
+            }
+            goto next_packet;
+        }
+    }
+
+end:
+    return ret;
+}
+
+/**
+ * Establish the SRTP context using the keying material exported from DTLS.
+ *
+ * Create separate SRTP contexts for sending video and audio, as their sequences differ
+ * and should not share a single context. Generate a single SRTP context for receiving
+ * RTCP only.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int setup_srtp(RTCContext *rtc)
+{
+    int ret;
+    char recv_key[RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN];
+    char send_key[RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN];
+    char buf[AV_BASE64_SIZE(RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN)];
+    /**
+     * The profile for OpenSSL's SRTP is SRTP_AES128_CM_SHA1_80, see ssl/d1_srtp.c.
+     * The profile for FFmpeg's SRTP is SRTP_AES128_CM_HMAC_SHA1_80, see libavformat/srtp.c.
+     */
+    const char* suite = "SRTP_AES128_CM_HMAC_SHA1_80";
+    // int is_dtls_active = whip->flags & WHIP_DTLS_ACTIVE; 0 for now
+    int is_dtls_active = 0; // just for now
+    char *cp = is_dtls_active ? send_key : recv_key;
+    char *sp = is_dtls_active ? recv_key : send_key;
+
+    ret = ff_dtls_export_materials(rtc->dtls_uc, rtc->dtls_srtp_materials, sizeof(rtc->dtls_srtp_materials));
+    if (ret < 0)
+        goto end;
+    /**
+     * This represents the material used to build the SRTP master key. It is
+     * generated by DTLS and has the following layout:
+     *          16B         16B         14B             14B
+     *      client_key | server_key | client_salt | server_salt
+     */
+    char *client_key = rtc->dtls_srtp_materials;
+    char *server_key = rtc->dtls_srtp_materials + RTC_DTLS_SRTP_KEY_LEN;
+    char *client_salt = server_key + RTC_DTLS_SRTP_KEY_LEN;
+    char *server_salt = client_salt + RTC_DTLS_SRTP_SALT_LEN;
+
+    memcpy(cp, client_key, RTC_DTLS_SRTP_KEY_LEN);
+    memcpy(cp + RTC_DTLS_SRTP_KEY_LEN, client_salt, RTC_DTLS_SRTP_SALT_LEN);
+
+    memcpy(sp, server_key, RTC_DTLS_SRTP_KEY_LEN);
+    memcpy(sp + RTC_DTLS_SRTP_KEY_LEN, server_salt, RTC_DTLS_SRTP_SALT_LEN);
+
+    /* Setup SRTP context for outgoing packets */
+    if (!av_base64_encode(buf, sizeof(buf), send_key, sizeof(send_key))) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to encode send key\n");
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&rtc->srtp_audio_send, suite, buf);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to set crypto for audio send\n");
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&rtc->srtp_video_send, suite, buf);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to set crypto for video send\n");
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&rtc->srtp_video_rtx_send, suite, buf);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to set crypto for video rtx send\n");
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&rtc->srtp_rtcp_send, suite, buf);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to set crypto for rtcp send\n");
+        goto end;
+    }
+
+    /* Setup SRTP context for incoming packets */
+    if (!av_base64_encode(buf, sizeof(buf), recv_key, sizeof(recv_key))) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to encode recv key\n");
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&rtc->srtp_recv, suite, buf);
+    if (ret < 0) {
+        av_log(rtc->ctx, AV_LOG_ERROR, "Failed to set crypto for recv\n");
+        goto end;
+    }
+
+    if (rtc->state < RTC_STATE_SRTP_FINISHED)
+        rtc->state = RTC_STATE_SRTP_FINISHED;
+    rtc->rtc_srtp_time = av_gettime_relative();
+    av_log(rtc->ctx, AV_LOG_VERBOSE, "SRTP setup done, state=%d, suite=%s, key=%zuB, elapsed=%.2fms\n",
+        rtc->state, suite, sizeof(send_key), ELAPSED(rtc->rtc_starttime, av_gettime_relative()));
+
+end:
+    return ret;
+}
+
+/**
+ * Creates dedicated RTP muxers for each stream in the AVFormatContext to build RTP
+ * packets from the encoded frames.
+ *
+ * The corresponding SRTP context is utilized to encrypt each stream's RTP packets. For
+ * example, a video SRTP context is used for the video stream. Additionally, the
+ * "on_rtp_write_packet" callback function is set as the write function for each RTP
+ * muxer to send out encrypted RTP packets.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int create_rtp_muxer(RTCContext *rtc)
+{
+    int ret, i, is_video, buffer_size, max_packet_size;
+    AVFormatContext *rtp_ctx = NULL;
+    AVDictionary *opts = NULL;
+    uint8_t *buffer = NULL;
+    rtc->udp->flags |= AVIO_FLAG_NONBLOCK;
+
+
+    /* The UDP buffer size, may greater than MTU. */
+    buffer_size = RTC_MAX_UDP_BUFFER_SIZE;
+    /* The RTP payload max size. Reserved some bytes for SRTP checksum and padding. */
+    max_packet_size = rtc->pkt_size - RTC_DTLS_SRTP_CHECKSUM_LEN;
+
+    for (i = 0; i < s->nb_streams; i++) {
+        rtp_ctx = avformat_alloc_context();
+        if (!rtp_ctx) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+
+        EXTERN const FFOutputFormat ff_rtp_muxer;
+        rtp_ctx->oformat = &ff_rtp_muxer.p;
+        if (!avformat_new_stream(rtp_ctx, NULL)) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        /* Pass the interrupt callback on */
+        rtp_ctx->interrupt_callback = s->interrupt_callback;
+        /* Copy the max delay setting; the rtp muxer reads this. */
+        rtp_ctx->max_delay = s->max_delay;
+        /* Copy other stream parameters. */
+        rtp_ctx->streams[0]->sample_aspect_ratio = s->streams[i]->sample_aspect_ratio;
+        rtp_ctx->flags |= s->flags & AVFMT_FLAG_BITEXACT;
+        rtp_ctx->strict_std_compliance = s->strict_std_compliance;
+
+        /* Set the synchronized start time. */
+        rtp_ctx->start_time_realtime = s->start_time_realtime;
+
+        avcodec_parameters_copy(rtp_ctx->streams[0]->codecpar, s->streams[i]->codecpar);
+        rtp_ctx->streams[0]->time_base = s->streams[i]->time_base;
+
+        /**
+         * For H.264, consistently utilize the annexb format through the Bitstream Filter (BSF);
+         * therefore, we deactivate the extradata detection for the RTP muxer.
+         */
+        if (s->streams[i]->codecpar->codec_id == AV_CODEC_ID_H264) {
+            av_freep(&rtp_ctx->streams[0]->codecpar->extradata);
+            rtp_ctx->streams[0]->codecpar->extradata_size = 0;
+        }
+
+        buffer = av_malloc(buffer_size);
+        if (!buffer) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+
+        rtp_ctx->pb = avio_alloc_context(buffer, buffer_size, 1, s, NULL, on_rtp_write_packet, NULL);
+        if (!rtp_ctx->pb) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        rtp_ctx->pb->max_packet_size = max_packet_size;
+        rtp_ctx->pb->av_class = &ff_avio_class;
+
+        is_video = s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+        av_dict_set_int(&opts, "payload_type", is_video ? whip->rtc.video_payload_type : whip->rtc.audio_payload_type, 0);
+        av_dict_set_int(&opts, "ssrc", is_video ? whip->rtc.video_ssrc : whip->rtc.audio_ssrc, 0);
+        av_dict_set_int(&opts, "seq", is_video ? whip->rtc.video_first_seq : whip->rtc.audio_first_seq, 0);
+
+        ret = avformat_write_header(rtp_ctx, &opts);
+        if (ret < 0) {
+            av_log(rtc->ctx, AV_LOG_ERROR, "Failed to write rtp header\n");
+            goto end;
+        }
+
+        ff_format_set_url(rtp_ctx, av_strdup(s->url));
+        s->streams[i]->time_base = rtp_ctx->streams[0]->time_base;
+        s->streams[i]->priv_data = rtp_ctx;
+        rtp_ctx = NULL;
+    }
+
+    if (whip->state < WHIP_STATE_READY)
+        whip->state = WHIP_STATE_READY;
+    av_log(rtc->ctx, AV_LOG_INFO, "Muxer state=%d, buffer_size=%d, max_packet_size=%d, "
+                           "elapsed=%.2fms(init:%.2f,offer:%.2f,answer:%.2f,udp:%.2f,ice:%.2f,dtls:%.2f,srtp:%.2f)\n",
+        whip->state, buffer_size, max_packet_size, ELAPSED(whip->whip_starttime, av_gettime_relative()),
+        ELAPSED(whip->whip_starttime,   whip->whip_init_time),
+        ELAPSED(whip->whip_init_time,   whip->whip_offer_time),
+        ELAPSED(whip->whip_offer_time,  whip->whip_answer_time),
+        ELAPSED(whip->whip_answer_time, whip->whip_udp_time),
+        ELAPSED(whip->whip_udp_time,    whip->whip_ice_time),
+        ELAPSED(whip->whip_ice_time,    whip->whip_dtls_time),
+        ELAPSED(whip->whip_dtls_time,   whip->whip_srtp_time));
+
+end:
+    if (rtp_ctx) {
+        if (!rtp_ctx->pb)
+            av_freep(&buffer);
+        avio_context_free(&rtp_ctx->pb);
+    }
+    avformat_free_context(rtp_ctx);
     av_dict_free(&opts);
     return ret;
 }
