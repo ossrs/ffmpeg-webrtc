@@ -180,6 +180,15 @@ typedef struct H264SliceContext {
     GetBitContext gb;
     ERContext *er;
 
+    /* Data partitioning: residual comes from gb_dpb (intra) or gb_dpc (inter),
+     * chosen per macroblock. Values not pointers: this struct is memcpy'd. */
+    GetBitContext gb_dpb;
+    GetBitContext gb_dpc;
+    int data_partitioning;
+    int dpb_available;
+    int dpc_available;
+    unsigned slice_id;
+
     int slice_num;
     int slice_type;
     int slice_type_nos;         ///< S free slice type (SI/SP are remapped to I/P)
@@ -689,8 +698,18 @@ void ff_h264_draw_horiz_band(const H264Context *h, H264SliceContext *sl, int y, 
  *
  * Parse the slice header, starting a new field/frame if necessary. If any
  * slices are queued for the previous field, they are decoded.
+ *
+ * @param queued set to the queued context, or NULL if the slice was discarded
  */
-int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal);
+int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal,
+                               H264SliceContext **queued);
+
+/**
+ * Attach a slice data partition B or C to the slice started by partition A.
+ */
+int ff_h264_attach_slice_partition(const H264Context *h, H264SliceContext *sl,
+                                   const H2645NAL *nal);
+
 int ff_h264_execute_decode_slices(H264Context *h);
 int ff_h264_update_thread_context(AVCodecContext *dst,
                                   const AVCodecContext *src);

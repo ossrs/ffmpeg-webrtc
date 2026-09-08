@@ -94,6 +94,7 @@ static int amf_vqe_filter_config_output(AVFilterLink *outlink)
     AMFVQEFilterContext *vqe_ctx = avctx->priv;
     AMFFilterContext    *amf_ctx = &vqe_ctx->common;
     AVAMFDeviceContext  *device_ctx = NULL;
+    enum AMF_MEMORY_TYPE mem_type = AMF_MEMORY_UNKNOWN;
 
     int err;
     AMF_RESULT res;
@@ -110,8 +111,11 @@ static int amf_vqe_filter_config_output(AVFilterLink *outlink)
 
     amf_filter = amf_ctx->component;
 
-    if (vqe_ctx->engine_type != -1)
+    mem_type = av_amf_get_memory_type(device_ctx);
+    if (vqe_ctx->engine_type != -1) {
         AMF_ASSIGN_PROPERTY_INT64(res, amf_filter, AMF_VIDEO_ENHANCER_ENGINE_TYPE, vqe_ctx->engine_type);
+    } else if (mem_type != AMF_MEMORY_UNKNOWN)
+        AMF_ASSIGN_PROPERTY_INT64(res, amf_filter, AMF_VIDEO_ENHANCER_ENGINE_TYPE, mem_type);
 
     AMF_ASSIGN_PROPERTY_DOUBLE(res, amf_filter, AMF_VE_FCR_ATTENUATION, vqe_ctx->attenuation);
     AMF_RETURN_IF_FALSE(avctx, res == AMF_OK, AVERROR_UNKNOWN, "Failed to set VQ enhancer attenuation: %d\n", res);
@@ -125,11 +129,10 @@ static int amf_vqe_filter_config_output(AVFilterLink *outlink)
 #define OFFSET(x) offsetof(AMFVQEFilterContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 static const AVOption vqe_amf_options[] = {
-    { "engine_type",    "Engine type",   OFFSET(engine_type), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, AMF_MEMORY_OPENCL, .flags = FLAGS, "engine_type" },
+    { "engine_type",    "Engine type",   OFFSET(engine_type), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, AMF_MEMORY_DX12, .flags = FLAGS, "engine_type" },
     { "dx11",           "DirectX 11",    0,  AV_OPT_TYPE_CONST,   { .i64 = AMF_MEMORY_DX11 }, 0, 0, FLAGS, "engine_type" },
-    { "dx12",           "DirectX 12",    0,  AV_OPT_TYPE_CONST,   { .i64 = AMF_MEMORY_DX12 }, 0, 0, FLAGS, "engine_type" },
     { "vulkan",         "Vulkan",        0,  AV_OPT_TYPE_CONST,   { .i64 = AMF_MEMORY_VULKAN }, 0, 0, FLAGS, "engine_type" },
-    { "opencl",         "OpenCL",        0,  AV_OPT_TYPE_CONST,   { .i64 = AMF_MEMORY_OPENCL }, 0, 0, FLAGS, "engine_type" },
+    { "dx12",           "DirectX 12",    0,  AV_OPT_TYPE_CONST,   { .i64 = AMF_MEMORY_DX12 }, 0, 0, FLAGS, "engine_type" },
 
     { "attenuation",    "Control VQEnhancer strength", OFFSET(attenuation), AV_OPT_TYPE_DOUBLE,  { .dbl = 0.1  },  0.02, 0.4, FLAGS, "attenuation" },
 

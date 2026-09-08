@@ -159,6 +159,9 @@ void ff_sws_uop_name(const SwsUOp *op, char buf[SWS_UOP_NAME_MAX])
         const unsigned size = 1u << par->dither.size_log2;
         av_bprintf(&bp, "_%ux%u", size, size);
         break;
+    case SWS_UOP_LUT_3D:
+        av_bprintf(&bp, "_%s", par->lut3d.dynamic ? "dynamic" : "static");
+        break;
     }
 
     av_assert0(av_bprint_is_complete(&bp));
@@ -174,6 +177,9 @@ static void uop_uninit(SwsUOp *uop)
     case SWS_UOP_READ_PLANAR_FV:
     case SWS_UOP_READ_PLANAR_FV_FMA:
         av_refstruct_unref(&uop->data.kernel);
+        break;
+    case SWS_UOP_LUT_3D:
+        av_refstruct_unref(&uop->data.lut3d);
         break;
     }
 
@@ -506,11 +512,12 @@ static int translate_linear_op(SwsContext *ctx, SwsUOpList *ops,
         .uop  = SWS_UOP_LINEAR,
     };
 
+    const uint32_t mask = ff_sws_linear_mask(&op->lin);
     const bool bitexact = ctx->flags & SWS_BITEXACT;
     uint32_t exact = 0;
 
     for (int i = 0; i < 4; i++) {
-        if (!SWS_OP_NEEDED(op, i) || !(op->lin.mask & SWS_MASK_ROW(i))) {
+        if (!SWS_OP_NEEDED(op, i) || !(mask & SWS_MASK_ROW(i))) {
             uop.par.lin.zero |= SWS_MASK_ROW(i);
             continue;
         }
@@ -653,6 +660,11 @@ static int translate_op(SwsContext *ctx, SwsUOpList *uops, SwsUOpFlags flags,
     case SWS_OP_SWAP_BYTES:
         uop.uop = SWS_UOP_SWAP_BYTES;
         uop.type = pixel_type_to_int(op->type);
+        break;
+    case SWS_OP_LUT_3D:
+        uop.uop = SWS_UOP_LUT_3D;
+        uop.par.lut3d.dynamic = op->lut3d.dynamic;
+        uop.data.lut3d = av_refstruct_ref_c(op->lut3d.lut);
         break;
     default:
         return AVERROR(ENOTSUP);

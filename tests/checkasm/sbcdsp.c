@@ -18,6 +18,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "checkasm.h"
 #include "libavcodec/sbcdsp.h"
@@ -53,9 +54,9 @@ static void check_sbc_analyze(SBCDSPContext *sbcdsp)
             // for sbc_analyze_4 it can be 0 or 8 mod 16.
             const int16_t *const inp = i || rnd() & 1 ? in : in + 4;
             // Use the proper const tables as random ones can cause overflow
-            #define CONST(SIZE, ODDEVEN) sbcdsp_analysis_consts_fixed ## SIZE ## _simd_ ## ODDEVEN
-            const int16_t *const consts = rnd() & 1 ? (i ? CONST(8, odd)  : CONST(4, odd))
-                                                    : (i ? CONST(8, even) : CONST(4, even));
+            #define A_CONST(SIZE, ODDEVEN) sbcdsp_analysis_consts_fixed ## SIZE ## _simd_ ## ODDEVEN
+            const int16_t *const consts = rnd() & 1 ? (i ? A_CONST(8, odd)  : A_CONST(4, odd))
+                                                    : (i ? A_CONST(8, even) : A_CONST(4, even));
 
             call_ref(inp, out_ref, consts);
             call_new(inp, out_new, consts);
@@ -69,7 +70,7 @@ static void check_sbc_analyze(SBCDSPContext *sbcdsp)
     report("sbc_analyze");
 }
 
-static void check_sbc_calc_scalefactors(const SBCDSPContext *const sbcdsp)
+static void check_sbc_calc_scalefactors(const SBCDSPContext *const sbcdsp, int blocks)
 {
     DECLARE_ALIGNED(SBC_ALIGN,  int32_t, sb_sample_f)[16][2][8];
     DECLARE_ALIGNED(SBC_ALIGN, uint32_t, scale_factor_ref)[2][8];
@@ -79,9 +80,6 @@ static void check_sbc_calc_scalefactors(const SBCDSPContext *const sbcdsp)
                        uint32_t scale_factor[2][8],
                        int blocks, int channels, int subbands);
 
-    static int blocks = 0;
-    if (!blocks)
-        blocks = ((const int[]){4, 8, 12, 15, 16})[rnd() % 5];
     int inited = 0;
 
     for (int ch = 1; ch <= 2; ++ch) {
@@ -110,12 +108,13 @@ static void check_sbc_calc_scalefactors(const SBCDSPContext *const sbcdsp)
 
 void checkasm_check_sbcdsp(void)
 {
-    SBCDSPContext sbcdsp;
+    SBCDSPContext sbcdsp = { 0 };
+    int blocks = ((const int[]){4, 8, 12, 15, 16})[rnd() % 5];
 
     ff_sbcdsp_init(&sbcdsp);
 
     check_sbc_analyze(&sbcdsp);
 
-    check_sbc_calc_scalefactors(&sbcdsp);
+    check_sbc_calc_scalefactors(&sbcdsp, blocks);
     report("calc_scalefactors");
 }

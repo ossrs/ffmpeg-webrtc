@@ -63,15 +63,71 @@ FATE_EAC3 += fate-eac3-5
 fate-eac3-5: CMD = pcm -i $(TARGET_SAMPLES)/eac3/the_great_wall_7.1.eac3
 fate-eac3-5: REF = $(SAMPLES)/eac3/the_great_wall_7.1.pcm
 
-$(FATE_AC3) $(FATE_EAC3): CMP = oneoff
+FATE_EAC3_FIXED += fate-eac3-fixed-1
+fate-eac3-fixed-1: CMD = pcm -c:a ac3_fixed -i $(TARGET_SAMPLES)/eac3/csi_miami_5.1_256_spx_small.eac3
+fate-eac3-fixed-1: REF = $(SAMPLES)/eac3/csi_miami_5.1_256_spx_small_v2.pcm
+
+FATE_EAC3_FIXED += fate-eac3-fixed-2
+fate-eac3-fixed-2: CMD = pcm -c:a ac3_fixed -i $(TARGET_SAMPLES)/eac3/csi_miami_stereo_128_spx_small.eac3
+fate-eac3-fixed-2: REF = $(SAMPLES)/eac3/csi_miami_stereo_128_spx_small_v2.pcm
+
+FATE_EAC3_FIXED += fate-eac3-fixed-3
+fate-eac3-fixed-3: CMD = pcm -c:a ac3_fixed -i $(TARGET_SAMPLES)/eac3/matrix2_commentary1_stereo_192_small.eac3
+fate-eac3-fixed-3: REF = $(SAMPLES)/eac3/matrix2_commentary1_stereo_192_small_v2.pcm
+
+FATE_EAC3_FIXED += fate-eac3-fixed-4
+fate-eac3-fixed-4: CMD = pcm -c:a ac3_fixed -i $(TARGET_SAMPLES)/eac3/serenity_english_5.1_1536_small.eac3
+fate-eac3-fixed-4: REF = $(SAMPLES)/eac3/serenity_english_5.1_1536_small_v2.pcm
+
+# the fixed decoder has to keep the overlap of the independent substream when
+# the dependent substream uses a different coefficient format
+FATE_EAC3_FIXED += fate-eac3-fixed-5
+fate-eac3-fixed-5: CMD = pcm -c:a ac3_fixed -i $(TARGET_SAMPLES)/eac3/the_great_wall_7.1.eac3
+fate-eac3-fixed-5: REF = $(SAMPLES)/eac3/the_great_wall_7.1.pcm
+
+$(FATE_AC3) $(FATE_EAC3) $(FATE_EAC3_FIXED): CMP = oneoff
+
+# the references were generated with the truncating dequantization
+# (mantissa >> exp) that the float decoder used to share with ac3_fixed.
+# the float decoder now dequantizes exactly (mantissa * 2^-exp), which
+# moves its output by up to 1 s16 unit on these streams, except a measured
+# MAXDIFF of 2 on fate-ac3-2.0 and fate-ac3-5.1.
+fate-ac3-2.0: FUZZ = 2
+fate-ac3-5.1: FUZZ = 2
 
 FATE_AC3-$(call  PCM, AC3,  AC3 AC3_FIXED, PCM_S16LE_MUXER ARESAMPLE_FILTER)  += $(FATE_AC3)
 FATE_EAC3-$(call PCM, EAC3, EAC3,          PCM_S16LE_MUXER ARESAMPLE_FILTER) += $(FATE_EAC3)
+FATE_EAC3-$(call PCM, EAC3, EAC3 AC3_FIXED, PCM_S16LE_MUXER ARESAMPLE_FILTER) += $(FATE_EAC3_FIXED)
 
 FATE_AC3-$(call ENCDEC, AC3, MP4 MOV, WAV_MUXER WAV_DEMUXER ARESAMPLE_FILTER PCM_S16LE_ENCODER PIPE_PROTOCOL) += fate-ac3-encode
 fate-ac3-encode: CMD = enc_dec_pcm mp4 wav s16le $(subst $(SAMPLES),$(TARGET_SAMPLES),$(REF)) -c:a ac3 -b:a 128k
 fate-ac3-encode: CMP_TARGET = 404.53
 
+# coupling must not cancel persistent out-of-phase stereo content.
+AC3_PHASE_EXPR = 0.025*(sin(16000*PI*t)+sin(20000*PI*t)+sin(24000*PI*t)+sin(28000*PI*t))
+tests/data/fate/ac3-phase.wav: TAG = GEN
+tests/data/fate/ac3-phase.wav: ffmpeg$(PROGSSUF)$(EXESUF) | tests/data/fate
+	$(M)$(TARGET_EXEC) $(TARGET_PATH)/$< -nostdin -f lavfi \
+	-i "aevalsrc=$(AC3_PHASE_EXPR)|-$(AC3_PHASE_EXPR):s=48000:d=1" \
+	-c:a pcm_s16le -y $(TARGET_PATH)/$@ 2>/dev/null
+
+AC3_PHASE_DEPS = FFMPEG LAVFI_INDEV AEVALSRC_FILTER ARESAMPLE_FILTER \
+                 MP4_MUXER MOV_DEMUXER WAV_MUXER WAV_DEMUXER \
+                 PCM_S16LE_ENCODER FILE_PROTOCOL PIPE_PROTOCOL
+FATE_AC3_PHASE-$(call ALLYES, $(AC3_PHASE_DEPS) AC3_ENCODER AC3_DECODER) += fate-ac3-phase
+FATE_AC3_PHASE-$(call ALLYES, $(AC3_PHASE_DEPS) AC3_FIXED_ENCODER AC3_DECODER) += fate-ac3-fixed-phase
+FATE_AC3_PHASE-$(call ALLYES, $(AC3_PHASE_DEPS) EAC3_ENCODER EAC3_DECODER) += fate-eac3-phase
+# without phase restoration the measured stddev is about 1158.
+fate-ac3-phase: CMD = enc_dec_pcm mp4 wav s16le $(TARGET_PATH)/tests/data/fate/ac3-phase.wav -c:a ac3 -b:a 128k
+fate-ac3-phase: CMP_TARGET = 588.4
+fate-ac3-fixed-phase: CMD = enc_dec_pcm mp4 wav s16le $(TARGET_PATH)/tests/data/fate/ac3-phase.wav -c:a ac3_fixed -b:a 128k
+fate-ac3-fixed-phase: CMP_TARGET = 588.4
+fate-eac3-phase: CMD = enc_dec_pcm mp4 wav s16le $(TARGET_PATH)/tests/data/fate/ac3-phase.wav -c:a eac3 -b:a 128k
+fate-eac3-phase: CMP_TARGET = 588.4
+fate-ac3-phase fate-ac3-fixed-phase fate-eac3-phase: tests/data/fate/ac3-phase.wav
+fate-ac3-phase fate-ac3-fixed-phase fate-eac3-phase: CMP = stddev
+fate-ac3-phase fate-ac3-fixed-phase fate-eac3-phase: FUZZ = 2
+fate-ac3-phase fate-ac3-fixed-phase fate-eac3-phase: REF = tests/data/fate/ac3-phase.wav
 
 FATE_EAC3-$(call ENCDEC, EAC3, MP4 MOV, WAV_MUXER WAV_DEMUXER ARESAMPLE_FILTER PCM_S16LE_ENCODER PIPE_PROTOCOL) += fate-eac3-encode
 fate-eac3-encode: CMD = enc_dec_pcm mp4 wav s16le $(subst $(SAMPLES),$(TARGET_SAMPLES),$(REF)) -c:a eac3 -b:a 128k
@@ -102,11 +158,62 @@ fate-ac3-fixed-encode-3: tests/data/asynth-44100-6.wav
 fate-ac3-fixed-encode-3: SRC = $(TARGET_PATH)/tests/data/asynth-44100-6.wav
 fate-ac3-fixed-encode-3: CMD = framecrc -i $(SRC) -c:a ac3_fixed -flags2 +fixed_frame_size -ab 256k -af aresample,atrim=start_sample=0:end_sample=12096
 
+# With coupling and rematrixing disabled, this produces bap=0, dexp=24 bins
+# whose dither affects the decoded output.
+tests/data/fate/ac3-fixed-dexp24.ac3: TAG = GEN
+tests/data/fate/ac3-fixed-dexp24.ac3: tests/data/asynth-44100-2.wav
+tests/data/fate/ac3-fixed-dexp24.ac3: ffmpeg$(PROGSSUF)$(EXESUF) | tests/data/fate
+	$(M)$(TARGET_EXEC) $(TARGET_PATH)/$< \
+	-hide_banner -loglevel error -nostdin \
+	-i $(TARGET_PATH)/tests/data/asynth-44100-2.wav \
+	-c:a ac3_fixed -b:a 192k \
+	-channel_coupling 0 -stereo_rematrixing 0 -flags +bitexact \
+	-frames:a 173 -f ac3 -y $(TARGET_PATH)/$@
+
+FATE_AC3_FIXED_DEXP24-$(call ALLYES, FFMPEG WAV_DEMUXER ARESAMPLE_FILTER ATRIM_FILTER \
+                                    AC3_FIXED_ENCODER FRAMECRC_MUXER \
+                                    AC3_MUXER AC3_DEMUXER AC3_FIXED_DECODER \
+                                    PCM_S16LE_DECODER PCM_S16LE_ENCODER \
+                                    FILE_PROTOCOL) += fate-ac3-fixed-dexp24
+fate-ac3-fixed-dexp24: tests/data/fate/ac3-fixed-dexp24.ac3
+fate-ac3-fixed-dexp24: CMD = framecrc -auto_conversion_filters -c ac3_fixed \
+                                   -i $(TARGET_PATH)/tests/data/fate/ac3-fixed-dexp24.ac3 \
+                                   -af atrim=start_sample=264192
+
+# digital silence encoded with the bitexact fixed-point encoder must decode
+# to pure dither noise at the level mandated by the spec (mantissa * 2^-exp).
+# The former truncating dequantization (mantissa >> exp) collapsed the dither
+# mantissas to coarse {-1, 0} steps, raising the decoded noise floor by a
+# factor of ~7 (stddev 18.22 instead of 2.69, tiny_psnr f32 units).
+tests/data/fate/ac3-silence.ac3: TAG = GEN
+tests/data/fate/ac3-silence.ac3: ffmpeg$(PROGSSUF)$(EXESUF) | tests/data/fate
+	$(M)$(TARGET_EXEC) $(TARGET_PATH)/$< -nostdin \
+	-f lavfi -i anullsrc=r=44100:cl=stereo -t 1 \
+	-c:a ac3_fixed -b:a 192k -flags +bitexact -f ac3 -y $(TARGET_PATH)/$@ 2>/dev/null
+
+tests/data/fate/ac3-silence.f32: TAG = GEN
+tests/data/fate/ac3-silence.f32: ffmpeg$(PROGSSUF)$(EXESUF) | tests/data/fate
+	$(M)$(TARGET_EXEC) $(TARGET_PATH)/$< -nostdin \
+	-f lavfi -i anullsrc=r=44100:cl=stereo -af atrim=end_sample=44100 \
+	-f f32le -y $(TARGET_PATH)/$@ 2>/dev/null
+
+FATE_AC3_DITHER-$(call ALLYES, FFMPEG LAVFI_INDEV ANULLSRC_FILTER ATRIM_FILTER \
+                               ARESAMPLE_FILTER AC3_FIXED_ENCODER AC3_MUXER \
+                               AC3_DEMUXER AC3_DECODER PCM_F32LE_ENCODER \
+                               PCM_F32LE_MUXER FILE_PROTOCOL PIPE_PROTOCOL) += fate-ac3-float-dither
+fate-ac3-float-dither: tests/data/fate/ac3-silence.ac3 tests/data/fate/ac3-silence.f32
+fate-ac3-float-dither: CMD = ffmpeg -auto_conversion_filters -cons_noisegen 1 -i $(TARGET_PATH)/tests/data/fate/ac3-silence.ac3 -af atrim=end_sample=44100 -f f32le -
+fate-ac3-float-dither: CMP = stddev
+fate-ac3-float-dither: CMP_UNIT = f32
+fate-ac3-float-dither: REF = tests/data/fate/ac3-silence.f32
+fate-ac3-float-dither: CMP_TARGET = 2.69
+
 FATE_EAC3-$(call ALLYES, EAC3_DEMUXER EAC3_MUXER EAC3_CORE_BSF) += fate-eac3-core-bsf
 fate-eac3-core-bsf: CMD = md5pipe -i $(TARGET_SAMPLES)/eac3/the_great_wall_7.1.eac3 -c:a copy -bsf:a eac3_core -fflags +bitexact -f eac3
 fate-eac3-core-bsf: CMP = oneline
 fate-eac3-core-bsf: REF = b704bf851e99b7442e9bed368b60e6ca
 
 FATE_SAMPLES_AVCONV += $(FATE_AC3-yes) $(FATE_EAC3-yes)
+FATE_FFMPEG += $(FATE_AC3_DITHER-yes) $(FATE_AC3_FIXED_DEXP24-yes) $(FATE_AC3_PHASE-yes)
 
-fate-ac3: $(FATE_AC3-yes) $(FATE_EAC3-yes)
+fate-ac3: $(FATE_AC3-yes) $(FATE_EAC3-yes) $(FATE_AC3_DITHER-yes) $(FATE_AC3_FIXED_DEXP24-yes) $(FATE_AC3_PHASE-yes)

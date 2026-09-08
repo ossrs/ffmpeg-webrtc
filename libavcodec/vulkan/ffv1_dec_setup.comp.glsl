@@ -91,7 +91,7 @@ int decode_current_mul(uint ctx_off, int mul_count, int64_t i)
     return mul[ndx];
 }
 
-void decode_remap(uint slice_idx, inout SliceContext sc)
+bool decode_remap(uint slice_idx, inout SliceContext sc)
 {
     uint end = uint(rct_offset - 1);
     uint flip_mask = end ^ (end >> 1);
@@ -106,10 +106,8 @@ void decode_remap(uint slice_idx, inout SliceContext sc)
             rc_state[k] = uint8_t(128);
 
         int mul_count = int(get_usymbol(0));
-        if (mul_count > 4096) {
-            sc.remap_count[p] = j;
-            return;
-        }
+        if (uint(mul_count) > 4096u)
+            return true;
         for (int mi = 0; mi < mul_count; mi++)
             mul[mi] = -1;
         mul[mul_count] = 1;
@@ -131,14 +129,14 @@ void decode_remap(uint slice_idx, inout SliceContext sc)
                 run1--;
                 if (current_mul > 1) {
                     int delta = get_isymbol(uint(lu*3 + 1)*CONTEXT_SIZE);
-                    if (delta <= -current_mul || delta > current_mul/2) {
-                        sc.remap_count[p] = j;
-                        return;
-                    }
+                    if (delta <= -current_mul || delta > current_mul/2)
+                        return true;
                     i += int64_t(current_mul - 1 + delta);
                 }
                 if (i - 1 >= int64_t(end))
                     break;
+                if (j >= fltmap[slice_idx][p].length())
+                    return true;
                 uint iv = uint(i);
                 fltmap[slice_idx][p][j++] = iv ^ (((iv & flip_mask) != 0u) ? 0u : flip);
                 i++;
@@ -148,8 +146,12 @@ void decode_remap(uint slice_idx, inout SliceContext sc)
                 i += int64_t(current_mul);
             lu ^= int(run == 0u);
         }
+        if (j == 0)
+            return true;
         sc.remap_count[p] = j;
     }
+
+    return false;
 }
 
 bool decode_slice_header(uint slice_idx, inout SliceContext sc)
@@ -200,8 +202,15 @@ bool decode_slice_header(uint slice_idx, inout SliceContext sc)
 
         if (micro_version >= 4) {
             sc.remap = get_usymbol(0);
-            if (sc.remap != 0)
-                decode_remap(slice_idx, sc);
+            if (sc.remap != 0) {
+                /* No fltmap buffer is bound unless the format can remap */
+                if (!remap_allowed) {
+                    sc.remap = 0;
+                    return true;
+                }
+                if (decode_remap(slice_idx, sc))
+                    return true;
+            }
         }
     }
 
@@ -217,7 +226,8 @@ void main(void)
     if (slice_idx == (gl_NumWorkGroups.x*gl_NumWorkGroups.y - 1))
         get_rac_equi();
 
-    decode_slice_header(slice_idx, slice_ctx[slice_idx]);
+    if (decode_slice_header(slice_idx, slice_ctx[slice_idx]))
+        slice_ctx[slice_idx].slice_dim = ivec2(0);
 
     slice_ctx[slice_idx].c = rc;
 

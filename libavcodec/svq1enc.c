@@ -48,12 +48,6 @@
 #include "libavutil/frame.h"
 #include "libavutil/mem_internal.h"
 
-// Workaround for GCC bug 102513
-#if AV_GCC_VERSION_AT_LEAST(10, 0) && AV_GCC_VERSION_AT_MOST(12, 0) \
-    && !defined(__clang__) && !defined(__INTEL_COMPILER)
-#pragma GCC optimize ("no-ipa-cp-clone")
-#endif
-
 typedef struct SVQ1EncContext {
     /* FIXME: Needed for motion estimation, should not be used for anything
      * else, the idea is to make the motion estimation eventually independent
@@ -134,6 +128,8 @@ static int encode_block(SVQ1EncContext *s, uint8_t *src, uint8_t *ref,
                         uint8_t *decoded, int stride, unsigned level,
                         int threshold, int lambda, int intra)
 {
+    av_assume(level <= 5U); // Workaround for GCC bug 102513
+
     int count, y, x, i, j, split, best_mean, best_score, best_count;
     int best_vector[6];
     int block_sum[7] = { 0, 0, 0, 0, 0, 0 };
@@ -649,14 +645,14 @@ static int svq1_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     init_put_bits(&pb, pkt->data, pkt->size);
     svq1_write_header(s, &pb, s->pict_type);
     for (i = 0; i < 3; i++) {
-        int ret = svq1_encode_plane(s, i, &pb,
-                              pict->data[i],
-                              s->last_picture->data[i],
-                              s->current_picture->data[i],
-                              s->frame_width  / (i ? 4 : 1),
-                              s->frame_height / (i ? 4 : 1),
-                              pict->linesize[i],
-                              s->current_picture->linesize[i]);
+        ret = svq1_encode_plane(s, i, &pb,
+                                pict->data[i],
+                                s->last_picture->data[i],
+                                s->current_picture->data[i],
+                                s->frame_width  / (i ? 4 : 1),
+                                s->frame_height / (i ? 4 : 1),
+                                pict->linesize[i],
+                                s->current_picture->linesize[i]);
         emms_c();
         if (ret < 0)
             return ret;

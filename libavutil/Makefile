@@ -277,6 +277,7 @@ TESTPROGS = adler32                                                     \
             dict                                                        \
             display                                                     \
             dovi_meta                                                   \
+            downmix_info                                                \
             encryption_info                                             \
             error                                                       \
             eval                                                        \
@@ -284,6 +285,7 @@ TESTPROGS = adler32                                                     \
             fifo                                                        \
             film_grain_params                                           \
             hash                                                        \
+            hdr_dynamic_metadata                                        \
             hdr_dynamic_vivid_metadata                                  \
             hmac                                                        \
             hwdevice                                                    \
@@ -309,6 +311,7 @@ TESTPROGS = adler32                                                     \
             sha                                                         \
             sha512                                                      \
             samplefmt                                                   \
+            side_data                                                   \
             side_data_array                                             \
             softfloat                                                   \
             spherical                                                   \

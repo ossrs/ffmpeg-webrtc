@@ -190,8 +190,11 @@ static int convert_to_aarch64_impl(SwsContext *ctx, const SwsOpList *ops, int n,
             }
         }
         break;
-    case SWS_OP_MIN:        out->uop = SWS_UOP_MIN;        break;
-    case SWS_OP_MAX:        out->uop = SWS_UOP_MAX;        break;
+    case SWS_OP_MIN:
+    case SWS_OP_MAX:
+        out->uop = (op->op == SWS_OP_MIN) ? SWS_UOP_MIN : SWS_UOP_MAX;
+        out->mask &= ff_sws_comp_mask_q4(op->clamp.limit);
+        break;
     case SWS_OP_SCALE:      out->uop = SWS_UOP_SCALE;      break;
     case SWS_OP_LINEAR:
         out->uop = (ctx->flags & SWS_BITEXACT)
@@ -199,8 +202,7 @@ static int convert_to_aarch64_impl(SwsContext *ctx, const SwsOpList *ops, int n,
                  : SWS_UOP_LINEAR_FMA;
         break;
     case SWS_OP_DITHER:     out->uop = SWS_UOP_DITHER;     break;
-    case SWS_OP_FILTER_H:
-    case SWS_OP_FILTER_V:
+    default:
         return AVERROR(ENOTSUP);
     }
 
@@ -268,8 +270,9 @@ static int convert_to_aarch64_impl(SwsContext *ctx, const SwsOpList *ops, int n,
     case SWS_UOP_LINEAR:
     case SWS_UOP_LINEAR_FMA:
         out->mask = 0;
+        const uint32_t lin_mask = ff_sws_linear_mask(&op->lin);
         for (int i = 0; i < 4; i++) {
-            if (!SWS_OP_NEEDED(op, i) || !(op->lin.mask & SWS_MASK_ROW(i))) {
+            if (!SWS_OP_NEEDED(op, i) || !(lin_mask & SWS_MASK_ROW(i))) {
                 for (int j = 0; j < 5; j++)
                     out->par.lin.zero |= SWS_MASK(i, j);
                 continue;

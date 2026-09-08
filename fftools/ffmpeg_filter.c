@@ -187,6 +187,11 @@ typedef struct FPSConvContext {
     int               framerate_clip;
 } FPSConvContext;
 
+typedef struct ReinitOpts {
+    int64_t pts;
+    AVDictionary *dict;
+} ReinitOpts;
+
 typedef struct OutputFilterPriv {
     OutputFilter            ofilter;
 
@@ -245,6 +250,9 @@ typedef struct OutputFilterPriv {
     int64_t                 ts_offset;
     int64_t                 next_pts;
     FPSConvContext          fps;
+
+    AVFifo                 *reinit_opts_fifo;
+    ReinitOpts              reinit_opts;
 
     unsigned                flags;
 } OutputFilterPriv;
@@ -415,13 +423,13 @@ DEF_CHOOSE_FORMAT(sample_rates, int, sample_rate, sample_rates, 0,
                   "%d", )
 
 DEF_CHOOSE_FORMAT(color_spaces, enum AVColorSpace, color_space, color_spaces,
-                  AVCOL_SPC_UNSPECIFIED, "%s", av_color_space_name);
+                  AVCOL_SPC_UNSPECIFIED, "%s", av_color_space_name)
 
 DEF_CHOOSE_FORMAT(color_ranges, enum AVColorRange, color_range, color_ranges,
-                  AVCOL_RANGE_UNSPECIFIED, "%s", av_color_range_name);
+                  AVCOL_RANGE_UNSPECIFIED, "%s", av_color_range_name)
 
 DEF_CHOOSE_FORMAT(alpha_modes, enum AVAlphaMode, alpha_mode, alpha_modes,
-                  AVALPHA_MODE_UNSPECIFIED, "%s", av_alpha_mode_name);
+                  AVALPHA_MODE_UNSPECIFIED, "%s", av_alpha_mode_name)
 
 static void choose_channel_layouts(OutputFilterPriv *ofp, AVBPrint *bprint)
 {
@@ -647,10 +655,22 @@ static const char *ofilter_item_name(void *obj)
     return ofp->log_name;
 }
 
+static const AVOption ofilter_options[] = {
+    {"video_size", "set video size", offsetof(OutputFilterPriv, width), AV_OPT_TYPE_IMAGE_SIZE, {.str = NULL}, 0, INT_MAX },
+    {"pixel_format", "set pixel format", offsetof(OutputFilterPriv, format), AV_OPT_TYPE_PIXEL_FMT, {.i64 = AV_PIX_FMT_NONE}, -1, INT_MAX },
+    {"colorspace", "color space", offsetof(OutputFilterPriv, color_space), AV_OPT_TYPE_INT, {.i64 = AVCOL_SPC_UNSPECIFIED }, 0, INT_MAX },
+    {"color_range", "color range", offsetof(OutputFilterPriv, color_range), AV_OPT_TYPE_INT, {.i64 = AVCOL_RANGE_UNSPECIFIED }, 0, INT_MAX },
+    {"alpha_mode", "color range", offsetof(OutputFilterPriv, alpha_mode), AV_OPT_TYPE_INT, {.i64 = AVALPHA_MODE_UNSPECIFIED }, 0, INT_MAX },
+    {"ar", "set audio sampling rate (in Hz)", offsetof(OutputFilterPriv, sample_rate), AV_OPT_TYPE_INT, {.i64 = 0 }, 0, INT_MAX },
+    {"ch_layout", NULL, offsetof(OutputFilterPriv, ch_layout), AV_OPT_TYPE_CHLAYOUT, {.str = NULL }, 0, 0 },
+    { NULL },
+};
+
 static const AVClass ofilter_class = {
     .class_name                = "OutputFilter",
     .version                   = LIBAVUTIL_VERSION_INT,
     .item_name                 = ofilter_item_name,
+    .option                    = ofilter_options,
     .parent_log_context_offset = offsetof(OutputFilterPriv, log_parent),
     .category                  = AV_CLASS_CATEGORY_FILTER,
 };
@@ -669,10 +689,8 @@ static OutputFilter *ofilter_alloc(FilterGraph *fg, enum AVMediaType type)
     ofp->log_parent   = fg;
     ofilter->graph    = fg;
     ofilter->type     = type;
-    ofp->format       = -1;
-    ofp->color_space  = AVCOL_SPC_UNSPECIFIED;
-    ofp->color_range  = AVCOL_RANGE_UNSPECIFIED;
-    ofp->alpha_mode   = AVALPHA_MODE_UNSPECIFIED;
+    av_opt_set_defaults(ofp);
+    ofp->reinit_opts  = (ReinitOpts){ .pts = AV_NOPTS_VALUE };
     ofilter->index    = fg->nb_outputs - 1;
 
     snprintf(ofp->log_name, sizeof(ofp->log_name), "%co%d",
@@ -813,6 +831,75 @@ static int set_channel_layout(OutputFilterPriv *f, const AVChannelLayout *layout
     return 0;
 }
 
+static int parse_reinit_opts(AVFifo **pout, const char *opts, void *logctx)
+{
+    AVFifo *out;
+    int ret = AVERROR_BUG;
+    char *ptr, *str, *substr = NULL;
+    const char *token;
+
+    str = av_strdup(opts);
+    if (!str)
+        return AVERROR(ENOMEM);
+
+    out = av_fifo_alloc2(1, sizeof(ReinitOpts), AV_FIFO_FLAG_AUTO_GROW);
+    if (!out) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    token = av_strtok(str, ",", &ptr);
+    while (token) {
+        ReinitOpts o = { 0 };
+        const char *subtoken;
+        char *subptr, *endptr;
+
+        substr = av_strdup(token);
+        if (!substr) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        subtoken = av_strtok(substr, "|", &subptr);
+        if (subtoken && subptr) {
+            if (!av_strstart(subtoken, "pts=", &subtoken)) {
+                av_log(logctx, AV_LOG_ERROR, "Invalid reinit identifier\n");
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+            o.pts = strtoll(subtoken, &endptr, 0);
+            if (*endptr || o.pts < 0) {
+                ret = AVERROR(EINVAL);
+                goto end;
+            }
+            ret = av_dict_parse_string(&o.dict, subptr, "=", ":", 0);
+            if (ret < 0) {
+                av_log(logctx, AV_LOG_ERROR, "Error parsing encoder options\n");
+                goto end;
+            }
+            ret = av_fifo_write(out, &o, 1);
+            if (ret < 0) {
+                av_dict_free(&o.dict);
+                goto end;
+            }
+        } else {
+            ret = AVERROR(EINVAL);
+            goto end;
+        }
+        av_freep(&substr);
+        if (ptr)
+            ptr += strspn(ptr, " \n\t\r");
+        token = av_strtok(NULL, ",", &ptr);
+    }
+
+    ret = 0;
+end:
+    *pout = out;
+    av_free(substr);
+    av_free(str);
+
+    return ret;
+}
+
 int ofilter_bind_enc(OutputFilter *ofilter, unsigned sched_idx_enc,
                      const OutputFilterOptions *opts)
 {
@@ -838,6 +925,12 @@ int ofilter_bind_enc(OutputFilter *ofilter, unsigned sched_idx_enc,
     ofilter->output_name  = av_strdup(opts->name);
     if (!ofilter->output_name)
         return AVERROR(EINVAL);
+
+    if (opts->reinit_opts) {
+        ret = parse_reinit_opts(&ofp->reinit_opts_fifo, opts->reinit_opts, ofilter);
+        if (ret < 0)
+            return ret;
+    }
 
     ret = av_dict_copy(&ofp->sws_opts, opts->sws_opts, 0);
     if (ret < 0)
@@ -1063,6 +1156,12 @@ void fg_free(FilterGraph **pfg)
         av_freep(&ofilter->name);
         av_freep(&ofilter->output_name);
         av_freep(&ofilter->apad);
+        av_dict_free(&ofp->reinit_opts.dict);
+        if (ofp->reinit_opts_fifo) {
+            while (av_fifo_read(ofp->reinit_opts_fifo, &ofp->reinit_opts, 1) >= 0)
+                av_dict_free(&ofp->reinit_opts.dict);
+            av_fifo_freep2(&ofp->reinit_opts_fifo);
+        }
         av_channel_layout_uninit(&ofp->ch_layout);
         av_frame_side_data_free(&ofp->side_data, &ofp->nb_side_data);
         av_freep(&fg->outputs[j]);
@@ -3079,7 +3178,7 @@ static const char *unknown_if_null(const char *str)
 }
 
 static int send_frame(FilterGraph *fg, FilterGraphThread *fgt,
-                      InputFilter *ifilter, AVFrame *frame)
+                      InputFilter *ifilter, AVFrame *frame, int force_reinit)
 {
     FilterGraphPriv *fgp = fgp_from_fg(fg);
     InputFilterPriv *ifp = ifp_from_ifilter(ifilter);
@@ -3156,7 +3255,7 @@ static int send_frame(FilterGraph *fg, FilterGraphThread *fgt,
     }
 
     /* (re)init the graph if possible, otherwise buffer the frame and return */
-    if (need_reinit || !fgt->graph) {
+    if (need_reinit || force_reinit || !fgt->graph) {
         AVFrame *tmp = av_frame_alloc();
 
         if (!tmp)
@@ -3202,6 +3301,8 @@ static int send_frame(FilterGraph *fg, FilterGraphThread *fgt,
                 av_bprintf(&reason, "downmix medatata changed, ");
             if (need_reinit & HWACCEL_CHANGED)
                 av_bprintf(&reason, "hwaccel changed, ");
+            if (force_reinit)
+                av_bprintf(&reason, "reinitialization arguments were provided, ");
             if (reason.len > 1)
                 reason.str[reason.len - 2] = '\0'; // remove last comma
             av_log(fg, AV_LOG_INFO, "Reconfiguring filter graph%s%s\n", reason.len ? " because " : "", reason.str);
@@ -3303,6 +3404,42 @@ fail:
     return AVERROR(ENOMEM);
 }
 
+static int check_reinit(FilterGraph *fg, FilterGraphThread *fgt)
+{
+    int ret, reinit = 0;
+
+    for (unsigned i = 0; i < fg->nb_outputs; i++) {
+        OutputFilterPriv *ofp = ofp_from_ofilter(fg->outputs[i]);
+
+        if (ofp->reinit_opts.pts == AV_NOPTS_VALUE && ofp->reinit_opts_fifo &&
+            av_fifo_can_read(ofp->reinit_opts_fifo)) {
+            av_fifo_read(ofp->reinit_opts_fifo, &ofp->reinit_opts, 1);
+        }
+        if (ofp->reinit_opts.pts != AV_NOPTS_VALUE &&
+            ofp->reinit_opts.pts <= av_rescale_q(fgt->frame->pts, fgt->frame->time_base, AV_TIME_BASE_Q)) {
+           FrameData *fd = frame_data(fgt->frame);
+           if (!fd)
+               return AVERROR(ENOMEM);
+
+           av_dict_free(&fd->reinit_opts);
+           ret = av_dict_copy(&fd->reinit_opts, ofp->reinit_opts.dict, 0);
+           if (ret < 0)
+               return ret;
+
+           av_opt_set_dict(ofp, &ofp->reinit_opts.dict);
+           av_dict_free(&ofp->reinit_opts.dict);
+
+           if (av_fifo_can_read(ofp->reinit_opts_fifo))
+               av_fifo_read(ofp->reinit_opts_fifo, &ofp->reinit_opts, 1);
+           else
+               ofp->reinit_opts = (ReinitOpts){ .pts = AV_NOPTS_VALUE };
+           reinit = 1;
+        }
+    }
+
+    return reinit;
+}
+
 static int filter_thread(void *arg)
 {
     FilterGraphPriv *fgp = arg;
@@ -3369,7 +3506,9 @@ static int filter_thread(void *arg)
             ret = sub2video_frame(ifilter, (fgt.frame->buf[0] || hb_frame) ? fgt.frame : NULL,
                                   !fgt.graph);
         } else if (fgt.frame->buf[0]) {
-            ret = send_frame(fg, &fgt, ifilter, fgt.frame);
+            ret = check_reinit(fg, &fgt);
+            if (ret >= 0)
+                ret = send_frame(fg, &fgt, ifilter, fgt.frame, ret);
         } else {
             av_assert1(o == FRAME_OPAQUE_EOF);
             ret = send_eof(&fgt, ifilter, fgt.frame->pts, fgt.frame->time_base);

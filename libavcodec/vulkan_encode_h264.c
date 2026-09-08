@@ -702,7 +702,7 @@ static int init_profile(AVCodecContext *avctx,
         AV_PROFILE_H264_CONSTRAINED_BASELINE,
         AV_PROFILE_H264_MAIN,
         AV_PROFILE_H264_HIGH,
-        AV_PROFILE_H264_HIGH_10,
+        AV_PROFILE_H264_HIGH_444_PREDICTIVE,
     };
     int nb_profiles = FF_ARRAY_ELEMS(known_profiles);
 
@@ -834,12 +834,16 @@ static av_cold int init_sequence_headers(AVCodecContext *avctx)
     if (err < 0)
         return err;
 
-    units->raw_sps.seq_scaling_matrix_present_flag =
-        !!(enc->caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H264_STD_SCALING_MATRIX_PRESENT_FLAG_SET_BIT_KHR);
-    units->raw_pps.pic_scaling_matrix_present_flag =
-        !!(enc->caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H264_STD_SCALING_MATRIX_PRESENT_FLAG_SET_BIT_KHR);
-    units->raw_pps.transform_8x8_mode_flag =
-        !!(enc->caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H264_STD_TRANSFORM_8X8_MODE_FLAG_SET_BIT_KHR);
+    /* High profile syntax: the capabilities only signal implementation
+     * support, lesser profiles prohibit these outright */
+    if (units->raw_pps.more_rbsp_data) {
+        units->raw_sps.seq_scaling_matrix_present_flag =
+            !!(enc->caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H264_STD_SCALING_MATRIX_PRESENT_FLAG_SET_BIT_KHR);
+        units->raw_pps.pic_scaling_matrix_present_flag =
+            !!(enc->caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H264_STD_SCALING_MATRIX_PRESENT_FLAG_SET_BIT_KHR);
+        units->raw_pps.transform_8x8_mode_flag =
+            !!(enc->caps.stdSyntaxFlags & VK_VIDEO_ENCODE_H264_STD_TRANSFORM_8X8_MODE_FLAG_SET_BIT_KHR);
+    }
 
     return 0;
 }
@@ -1476,6 +1480,12 @@ static av_cold int vulkan_encode_h264_init(AVCodecContext *avctx)
         return err;
 
     flags = ctx->codec->flags;
+
+    /* Baseline profiles have no B-slices */
+    if (avctx->profile == AV_PROFILE_H264_BASELINE ||
+        avctx->profile == AV_PROFILE_H264_CONSTRAINED_BASELINE)
+        flags &= ~(FF_HW_FLAG_B_PICTURES | FF_HW_FLAG_B_PICTURE_REFERENCES);
+
     if (!enc->caps.maxPPictureL0ReferenceCount &&
         !enc->caps.maxBPictureL0ReferenceCount &&
         !enc->caps.maxL1ReferenceCount) {
@@ -1589,7 +1599,7 @@ static const AVOption vulkan_encode_h264_options[] = {
     { PROFILE("constrained_baseline", AV_PROFILE_H264_CONSTRAINED_BASELINE) },
     { PROFILE("main",                 AV_PROFILE_H264_MAIN) },
     { PROFILE("high",                 AV_PROFILE_H264_HIGH) },
-    { PROFILE("high444p",             AV_PROFILE_H264_HIGH_10) },
+    { PROFILE("high444p",             AV_PROFILE_H264_HIGH_444_PREDICTIVE) },
 #undef PROFILE
 
     { "level", "Set level (level_idc)",

@@ -308,6 +308,7 @@ External library support:
   --enable-libxevdb        enable EVC decoding via libxevd (Base profile) [no]
   --enable-libxavs         enable AVS encoding via xavs [no]
   --enable-libxavs2        enable AVS2 encoding via xavs2 [no]
+  --enable-libcurl         enable HTTP(S) protocol support via libcurl [autodetect]
   --enable-libxcb          enable X11 grabbing using XCB [autodetect]
   --enable-libxcb-shm      enable X11 grabbing shm communication [autodetect]
   --enable-libxcb-xfixes   enable X11 grabbing mouse rendering [autodetect]
@@ -832,6 +833,10 @@ is_in(){
         [ $var = $value ] && return 0
     done
     return 1
+}
+
+msvc_style_linker(){
+    is_in $ld_type msvc icl lld-link
 }
 
 # The cfg loop is very hot (several thousands iterations), and in bash also
@@ -1671,6 +1676,32 @@ check_pkg_config(){
         eval add_cflags \$${name}_cflags
 }
 
+probe_msvc_zlib_libname(){
+    log probe_msvc_zlib_libname
+    zlib_msvc_lib=zlib.lib
+
+    msvc_style_linker || return 0
+    test_cmd $pkg_config --exists --print-errors zlib || return 0
+
+    zlib_pkg_libs=$($pkg_config --libs $pkg_config_flags zlib) || return 0
+    is_in -lz $zlib_pkg_libs || return 0
+
+    for zlib_pkg_lib in $zlib_pkg_libs; do
+        case $zlib_pkg_lib in
+            -L*)
+                zlib_pkg_libdir=${zlib_pkg_lib#-L}
+                if test -f "$zlib_pkg_libdir/z.lib"; then
+                    zlib_msvc_lib=z.lib
+                    return 0
+                elif test -f "$zlib_pkg_libdir/zlib.lib"; then
+                    zlib_msvc_lib=zlib.lib
+                    return 0
+                fi
+                ;;
+        esac
+    done
+}
+
 check_pkg_config_cpp(){
     log check_pkg_config_cpp "$@"
     name="$1"
@@ -1980,6 +2011,7 @@ EXTERNAL_AUTODETECT_LIBRARY_LIST="
     bzlib
     coreimage
     iconv
+    libcurl
     libxcb
     libxcb_shm
     libxcb_shape
@@ -2265,6 +2297,7 @@ THREADS_LIST="
 
 ATOMICS_LIST="
     atomics_win32
+    atomics_os2
 "
 
 AUTODETECT_LIBS="
@@ -2686,6 +2719,7 @@ HAVE_LIST="
     ffnvcodec_cuarray
     gzip
     ioctl_posix
+    iokit
     libdrm_getfb2
     makeinfo_html
     opencl_d3d11
@@ -2743,7 +2777,6 @@ CONFIG_EXTRA="
     faandct
     faanidct
     fdctdsp
-    fmtconvert
     frame_thread_encoder
     g722dsp
     golomb
@@ -3033,8 +3066,10 @@ valgrind_backtrace_deps="valgrind_valgrind_h"
 
 # threading support
 atomics_win32_if="MemoryBarrier"
+atomics_os2_if="stdatomic"
 atomics_native_if_any="$ATOMICS_LIST"
 w32threads_deps="atomics_native"
+os2threads_deps="atomics_native"
 threads_if_any="$THREADS_LIST"
 
 # subsystems
@@ -3091,7 +3126,7 @@ aac_decoder_select="adts_header mpeg4audio sinewin"
 aac_fixed_decoder_select="adts_header mpeg4audio"
 aac_encoder_select="audio_frame_queue lpc sinewin"
 aac_latm_decoder_select="aac_decoder aac_latm_parser"
-ac3_decoder_select="ac3_parser ac3dsp bswapdsp fmtconvert"
+ac3_decoder_select="ac3_parser ac3dsp bswapdsp"
 ac3_fixed_decoder_select="ac3_parser ac3dsp bswapdsp"
 ac3_encoder_select="ac3dsp audiodsp me_cmp"
 ac3_fixed_encoder_select="ac3dsp audiodsp me_cmp"
@@ -4012,7 +4047,7 @@ android_camera_indev_deps="android camera2ndk mediandk pthreads"
 alsa_indev_deps="alsa"
 alsa_outdev_deps="alsa"
 avfoundation_indev_deps="avfoundation corevideo coremedia pthreads AVCaptureSession"
-avfoundation_indev_suggest="coregraphics applicationservices"
+avfoundation_indev_suggest="coregraphics applicationservices iokit"
 avfoundation_indev_extralibs="-framework Foundation"
 audiotoolbox_outdev_deps="audiotoolbox pthreads AudioObjectPropertyAddress"
 audiotoolbox_outdev_extralibs="-framework AudioToolbox -framework CoreAudio"
@@ -4115,6 +4150,8 @@ ipns_gateway_protocol_select="https_protocol"
 libamqp_protocol_deps="librabbitmq"
 libamqp_protocol_select="network"
 librist_protocol_deps="librist"
+libcurl_protocol_deps="libcurl threads"
+libcurl_protocol_select="network"
 librist_protocol_select="network"
 librtmp_protocol_deps="librtmp"
 librtmpe_protocol_deps="librtmp"
@@ -4184,6 +4221,7 @@ freezedetect_filter_select="scene_sad"
 frei0r_deps_any="libdl LoadLibrary"
 frei0r_filter_deps="frei0r"
 frei0r_src_filter_deps="frei0r"
+fruc_vulkan_filter_deps="vulkan vulkan_1_4 spirv_compiler"
 fspp_filter_deps="gpl"
 fsync_filter_deps="avformat"
 gblur_vulkan_filter_deps="vulkan spirv_compiler"
@@ -5157,6 +5195,7 @@ armasm_flags(){
             # be passed to gas-preprocessor
             -M[TD]*)                                            ;;
             -guard:signret)                                     ;;
+            -experimental:*)                                    ;;
             *)                  echo $flag                      ;;
         esac
    done
@@ -5193,7 +5232,7 @@ msvc_common_flags(){
             -mthumb)              ;;
             -march=*)             ;;
             -mfp16-format=*)      ;;
-            -lz)                  echo zlib.lib ;;
+            -lz)                  echo ${zlib_msvc_lib:-zlib.lib} ;;
             -lx264)               echo libx264.lib ;;
             -lstdc++)             ;;
             -l*)                  echo ${flag#-l}.lib ;;
@@ -6423,8 +6462,8 @@ probe_libc(){
         if ! test_${pfx}cpp_condition crtdefs.h "defined(_UCRT)"; then
             add_${pfx}cppflags -D__USE_MINGW_ANSI_STDIO=1
         fi
-        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600" &&
-            add_${pfx}cppflags -D_WIN32_WINNT=0x0600
+        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0601" &&
+            add_${pfx}cppflags -D_WIN32_WINNT=0x0601
         add_${pfx}cppflags -D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600
     elif test_${pfx}cpp_condition _mingw.h "defined __MINGW_VERSION"  ||
          test_${pfx}cpp_condition _mingw.h "defined __MINGW32_VERSION"; then
@@ -6438,8 +6477,8 @@ probe_libc(){
         fi
         test_${pfx}cpp_condition _mingw.h "__MSVCRT_VERSION__ < 0x0700" &&
             add_${pfx}cppflags -D__MSVCRT_VERSION__=0x0700
-        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600" &&
-            add_${pfx}cppflags -D_WIN32_WINNT=0x0600
+        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0601" &&
+            add_${pfx}cppflags -D_WIN32_WINNT=0x0601
         add_${pfx}cppflags -D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600
     elif test_${pfx}cpp_condition crtversion.h "defined _VC_CRT_MAJOR_VERSION"; then
         eval ${pfx}libc_type=msvcrt
@@ -6454,25 +6493,8 @@ probe_libc(){
             fi
         fi
         add_${pfx}cppflags -D_USE_MATH_DEFINES -D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_WARNINGS
-        # The MSVC 2010 headers (Win 7.0 SDK) set _WIN32_WINNT to
-        # 0x601 by default unless something else is set by the user.
-        # This can easily lead to us detecting functions only present
-        # in such new versions and producing binaries requiring windows 7.0.
-        # Therefore explicitly set the default to Vista unless the user has
-        # set something else on the command line.
-        # Don't do this if WINAPI_FAMILY is set and is set to a non-desktop
-        # family. For these cases, configure is free to use any functions
-        # found in the SDK headers by default. (Alternatively, we could force
-        # _WIN32_WINNT to 0x0602 in that case.)
-        test_${pfx}cpp_condition stdlib.h "defined(_WIN32_WINNT)" ||
-            { test_${pfx}cpp <<EOF && add_${pfx}cppflags -D_WIN32_WINNT=0x0600; }
-#ifdef WINAPI_FAMILY
-#include <winapifamily.h>
-#if !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
-#error not desktop
-#endif
-#endif
-EOF
+        test_${pfx}cpp_condition windows.h "!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0601" &&
+            add_${pfx}cppflags -D_WIN32_WINNT=0x0601
         if [ "$pfx" = "" ]; then
             check_func strtoll || add_allcflags -Dstrtoll=_strtoi64
             check_func strtoull || add_allcflags -Dstrtoull=_strtoui64
@@ -7035,7 +7057,7 @@ check_headers direct.h
 check_headers dirent.h
 check_headers dxgidebug.h
 check_headers dxva.h
-check_headers dxva2api.h -D_WIN32_WINNT=0x0600
+check_headers dxva2api.h
 check_headers io.h
 enabled libdrm &&
     check_headers linux/dma-buf.h
@@ -7104,6 +7126,7 @@ enabled avfoundation && {
     disable coregraphics applicationservices
     check_lib coregraphics        CoreGraphics/CoreGraphics.h               CGGetActiveDisplayList "-framework CoreGraphics" ||
     check_lib applicationservices ApplicationServices/ApplicationServices.h CGGetActiveDisplayList "-framework ApplicationServices"
+    check_lib iokit               IOKit/IOKitLib.h                          IOServiceGetMatchingServices "-framework IOKit"
     check_objc_class AVFoundation/AVFoundation.h AVCaptureSession
 }
 
@@ -7248,8 +7271,10 @@ if ! disabled pthreads && ! enabled w32threads && ! enabled os2threads; then
     fi
 fi
 
+enabled zlib && msvc_style_linker && probe_msvc_zlib_libname
 enabled  zlib && { check_pkg_config zlib zlib "zlib.h" zlibVersion ||
-                   check_lib zlib   zlib.h      zlibVersion    -lz; }
+                   { zlib_msvc_lib=z.lib;    check_lib zlib zlib.h zlibVersion -lz; } ||
+                   { zlib_msvc_lib=zlib.lib; check_lib zlib zlib.h zlibVersion -lz; }; }
 enabled bzlib && check_lib bzlib bzlib.h BZ2_bzlibVersion    -lbz2
 enabled  lzma && check_lib lzma   lzma.h lzma_version_number -llzma
 
@@ -7312,6 +7337,7 @@ enabled libbluray         && require_pkg_config libbluray libbluray libbluray/bl
 enabled libbs2b           && require_pkg_config libbs2b libbs2b bs2b.h bs2b_open
 enabled libcaca           && require_pkg_config libcaca caca caca.h caca_create_canvas
 enabled libcodec2         && require libcodec2 codec2/codec2.h codec2_create -lcodec2
+enabled libcurl           && check_pkg_config libcurl "libcurl >= 7.88.0" curl/curl.h curl_easy_init
 enabled libdav1d          && require_pkg_config libdav1d "dav1d >= 1.0.0" "dav1d/dav1d.h" dav1d_version
 enabled libdavs2          && require_pkg_config libdavs2 "davs2 >= 1.6.0" davs2.h davs2_decoder_open
 enabled libdc1394         && require_pkg_config libdc1394 libdc1394-2 dc1394/dc1394.h dc1394_new

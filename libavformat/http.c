@@ -890,6 +890,50 @@ static int http_get_line(HTTPContext *s, char *line, int line_size)
     }
 }
 
+int ff_http_parse_status_line(void *logctx, const char *line, HTTPStatusLine *st)
+{
+    const char *p;
+
+    memset(st, 0, sizeof(*st));
+
+    if (!av_strstart(line, "HTTP/", &p) ||
+        !av_isdigit(p[0]) || p[1] != '.' || !av_isdigit(p[2]) ||
+        !av_isspace(p[3])) {
+        av_log(logctx, AV_LOG_ERROR, "Malformed HTTP status line.\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    av_strlcpy(st->version, p, sizeof(st->version));
+    st->willclose = !strcmp(st->version, "1.0");
+
+    p += 3;
+    while (av_isspace(*p))
+        p++;
+
+    /* RFC 9112 mandates a space after the code, but a bare "HTTP/1.1 200"
+     * is common enough in the wild to be worth accepting. */
+    if (!av_isdigit(p[0]) || !av_isdigit(p[1]) || !av_isdigit(p[2]) ||
+        (p[3] && !av_isspace(p[3]))) {
+        av_log(logctx, AV_LOG_ERROR, "Malformed HTTP status code.\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    st->code = 100 * (p[0] - '0') + 10 * (p[1] - '0') + p[2] - '0';
+    if (st->code < 100 || st->code > 599) {
+        av_log(logctx, AV_LOG_ERROR, "HTTP status code %d out of range.\n",
+               st->code);
+        return AVERROR_INVALIDDATA;
+    }
+    p += 3;
+    while (av_isspace(*p))
+        p++;
+    st->reason = p;
+
+    av_log(logctx, AV_LOG_TRACE, "http_code=%d\n", st->code);
+
+    return 0;
+}
+
 static int check_http_code(URLContext *h, int http_code, const char *end)
 {
     HTTPContext *s = h->priv_data;
@@ -898,7 +942,6 @@ static int check_http_code(URLContext *h, int http_code, const char *end)
     if (http_code >= 400 && http_code < 600 &&
         (http_code != 401 || s->auth_state.auth_type != HTTP_AUTH_NONE) &&
         (http_code != 407 || s->proxy_auth_state.auth_type != HTTP_AUTH_NONE)) {
-        end += strspn(end, SPACE_CHARS);
         av_log(h, AV_LOG_WARNING, "HTTP error %d %s\n", http_code, end);
         return ff_http_averror(http_code, AVERROR(EIO));
     }
@@ -1061,8 +1104,10 @@ static int parse_cookie(HTTPContext *s, const char *p, AVDictionary **cookies)
     char *name;
 
     // ensure the cookie is parsable
-    if (parse_set_cookie(p, &new_params))
+    if (parse_set_cookie(p, &new_params)) {
+        av_dict_free(&new_params);
         return -1;
+    }
 
     // if there is no cookie value there is nothing to parse
     cookie_entry = av_dict_iterate(new_params, NULL);
@@ -1179,7 +1224,7 @@ static int process_line(URLContext *h, char *line, int line_count, int *parsed_h
 {
     HTTPContext *s = h->priv_data;
     const char *auto_method =  h->flags & AVIO_FLAG_READ ? "POST" : "GET";
-    char *tag, *p, *end, *method, *resource, *version;
+    char *tag, *p, *method, *resource, *version;
     int ret;
 
     /* end of header */
@@ -1243,25 +1288,24 @@ static int process_line(URLContext *h, char *line, int line_count, int *parsed_h
             }
             av_log(h, AV_LOG_TRACE, "HTTP version string: %s\n", version);
         } else {
-            if (av_strncasecmp(p, "HTTP/1.0", 8) == 0)
-                s->willclose = 1;
-            while (*p != '/' && *p != '\0')
-                p++;
-            while (*p == '/')
-                p++;
-            av_freep(&s->http_version);
-            s->http_version = av_strndup(p, 3);
-            while (!av_isspace(*p) && *p != '\0')
-                p++;
-            while (av_isspace(*p))
-                p++;
-            s->http_code = strtol(p, &end, 10);
+            HTTPStatusLine st;
 
-            av_log(h, AV_LOG_TRACE, "http_code=%d\n", s->http_code);
+            if ((ret = ff_http_parse_status_line(h, p, &st)) < 0)
+                return ret;
+
+            /* Only ever set: a keep-alive decision made earlier must survive. */
+            if (st.willclose)
+                s->willclose = 1;
+
+            av_freep(&s->http_version);
+            if (!(s->http_version = av_strdup(st.version)))
+                return AVERROR(ENOMEM);
+
+            s->http_code = st.code;
 
             *parsed_http_code = 1;
 
-            if ((ret = check_http_code(h, s->http_code, end)) < 0)
+            if ((ret = check_http_code(h, s->http_code, st.reason)) < 0)
                 return ret;
         }
     } else {

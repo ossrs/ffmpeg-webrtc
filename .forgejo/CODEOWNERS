@@ -144,6 +144,7 @@ libavformat/frm.* @pross
 libavformat/hls.* @kasper93
 libavformat/hxvs.* @quink
 libavformat/iamf.* @jamrial
+libavformat/id3v2* @toots
 libavformat/icecast.c @ePirat
 libavformat/ico.* @pross
 libavformat/iff.* @pross
@@ -236,8 +237,12 @@ libavutil/tests/ambient_viewing_environment.* @MarcosAsh
 libavutil/tests/buffer.* @MarcosAsh
 libavutil/tests/csp.* @MarcosAsh
 libavutil/tests/dovi_meta.* @MarcosAsh
+libavutil/tests/downmix_info.* @MarcosAsh
+libavutil/tests/hdr_dynamic_metadata.* @MarcosAsh
 libavutil/tests/hdr_dynamic_vivid_metadata.* @MarcosAsh
 libavutil/tests/mastering_display_metadata.* @MarcosAsh
+libavutil/tests/pixdesc.* @MarcosAsh
+libavutil/tests/side_data.* @MarcosAsh
 libavutil/tests/tdrdi.* @MarcosAsh
 libavutil/tests/timestamp.* @MarcosAsh
 libavutil/tests/video_hint.* @MarcosAsh
@@ -246,8 +251,12 @@ tests/ref/fate/ambient_viewing_environment @MarcosAsh
 tests/ref/fate/buffer @MarcosAsh
 tests/ref/fate/csp @MarcosAsh
 tests/ref/fate/dovi_meta @MarcosAsh
+tests/ref/fate/downmix_info @MarcosAsh
+tests/ref/fate/hdr_dynamic_metadata @MarcosAsh
 tests/ref/fate/hdr_dynamic_vivid_metadata @MarcosAsh
 tests/ref/fate/mastering_display_metadata @MarcosAsh
+tests/ref/fate/pixdesc @MarcosAsh
+tests/ref/fate/side_data @MarcosAsh
 tests/ref/fate/sub-mcc.* @programmerjake
 tests/ref/fate/tdrdi @MarcosAsh
 tests/ref/fate/timestamp @MarcosAsh

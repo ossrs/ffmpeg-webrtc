@@ -452,12 +452,12 @@ static void check_range(const char *name, const SwsUOp *uop,
                         const unsigned ranges[NB_PLANES])
 {
     /* Test all planes to ensure data remains untouched */
-    return check_uop(name, uop, SWS_COMP_ALL, SWS_COMP_ALL, ranges);
+    check_uop(name, uop, SWS_COMP_ALL, SWS_COMP_ALL, ranges);
 }
 
 static void check_simple(const char *name, const SwsUOp *uop)
 {
-    return check_range(name, uop, NULL);
+    check_range(name, uop, NULL);
 }
 
 static void check_scalar(const char *name, SwsUOp *uop)
@@ -471,7 +471,7 @@ static void check_vec4(const char *name, SwsUOp *uop)
     for (int i = 0; i < 4; i++)
         uop->data.vec4[i] = rndpx(uop->type);
 
-    return check_simple(name, uop);
+    check_simple(name, uop);
 }
 
 #define MK_RANGES(R) ((const unsigned[]) { R, R, R, R })
@@ -608,7 +608,7 @@ static void check_linear(const char *name, SwsUOp *uop)
         }
     }
 
-    return check_simple(name, uop);
+    check_simple(name, uop);
 }
 
 static void check_dither(const char *name, SwsUOp *uop)
@@ -632,6 +632,32 @@ static void check_dither(const char *name, SwsUOp *uop)
     check_simple(name, uop);
 
     av_refstruct_unref(&matrix);
+}
+
+static void check_lut_3d(const char *name, SwsUOp *uop)
+{
+    SwsLut3D *lut3d = ff_sws_lut3d_alloc();
+    if (!lut3d) {
+        fail();
+        return;
+    }
+
+    checkasm_init(&lut3d->input, sizeof(lut3d->input));
+
+    if (uop->par.lut3d.dynamic) {
+        checkasm_init(&lut3d->tone_map, sizeof(lut3d->tone_map));
+        checkasm_init(&lut3d->output,   sizeof(lut3d->output));
+        lut3d->dynamic = true;
+
+        /* Prevent out-of-bounds read from IPT values with abs(PT) > 0.5 */
+        for (int i = 0; i < FF_ARRAY_ELEMS(lut3d->tone_map); i++)
+            lut3d->tone_map[i].y = FFMIN(lut3d->tone_map[i].y, 1 << 15);
+    }
+
+    uop->data.lut3d = lut3d;
+    check_range(name, uop, MK_RANGES(INPUT_LUT_SIZE - 1));
+
+    av_refstruct_unref(&lut3d);
 }
 
 #define CHECK_FUNCTION(CHECK, NAME, ...) \
@@ -678,4 +704,5 @@ void checkasm_check_sw_ops(void)
     CHECK_FOR(CLEAR,            check_vec4);
     CHECK_FOR(LINEAR,           check_linear);
     CHECK_FOR(DITHER,           check_dither);
+    CHECK_FOR(LUT_3D,           check_lut_3d);
 }

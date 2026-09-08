@@ -310,7 +310,7 @@ static void check_inv_trans_adding(void)
         void (*func)(uint8_t *, ptrdiff_t, int16_t *) = *(void **)((intptr_t) &h + tests[k].offset);
         if (check_func(func, "vc1dsp.%s", tests[k].name)) {
             matrix *coeffs;
-            declare_func_emms(AV_CPU_FLAG_MMX, void, uint8_t *, ptrdiff_t, int16_t *);
+            declare_func(void, uint8_t *, ptrdiff_t, int16_t *);
             RANDOMIZE_BUFFER16(inv_trans_in, 8 * 8);
             RANDOMIZE_BUFFER8(inv_trans_out, 10 * 24);
             coeffs = generate_inverse_quantized_transform_coefficients(tests[k].width, tests[k].height);
@@ -354,7 +354,7 @@ static void check_loop_filter(void)
 
     for (size_t k = 0; k < FF_ARRAY_ELEMS(tests); ++k) {
         void (*func)(uint8_t *, ptrdiff_t, int) = *(void **)((intptr_t) &h + tests[k].offset);
-        declare_func_emms(AV_CPU_FLAG_MMX, void, uint8_t *, ptrdiff_t, int);
+        declare_func(void, uint8_t *, ptrdiff_t, int);
         if (check_func(func, "vc1dsp.%s", tests[k].name)) {
             for (int count = 1000; count > 0; --count) {
                 int pq = rnd() % 31 + 1;

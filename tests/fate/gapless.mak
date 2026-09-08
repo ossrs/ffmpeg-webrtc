@@ -1,8 +1,19 @@
-FATE_GAPLESS-$(call FRAMECRC, MP3, MP3, ARESAMPLE_FILTER) += fate-gapless-mp3
+FATE_GAPLESS-$(call FRAMECRC, MP3, MP3, ARESAMPLE_FILTER WAV_MUXER MD5_PROTOCOL) += fate-gapless-mp3
 fate-gapless-mp3: CMD = gapless $(TARGET_SAMPLES)/gapless/gapless.mp3 "-c:a mp3"
 
-FATE_GAPLESSINFO_PROBE-$(CONFIG_MP3_DEMUXER) += fate-gapless-mp3-side-data
+FATE_GAPLESSINFO_PROBE-$(call ALLYES, MP3_DEMUXER MP3FLOAT_DECODER FILE_PROTOCOL) += fate-gapless-mp3-side-data
 fate-gapless-mp3-side-data: CMD = ffprobe_demux $(TARGET_SAMPLES)/gapless/gapless.mp3
+
+# The trailing padding of this sample spans two packets. The duration of the
+# remuxed file has to stay the one fate-gapless-mp3-side-data reports.
+FATE_GAPLESSENC_PROBE-$(call ALLYES, MP3_DEMUXER MP3_MUXER NULL_MUXER) += fate-gapless-mp3-remux
+fate-gapless-mp3-remux: CMD = transcode mp3 $(TARGET_SAMPLES)/gapless/gapless.mp3 mp3 "-c copy" "-c copy" "-of compact -show_entries stream=start_pts,duration_ts" "" "" "" null
+
+FATE_GAPLESS-$(call FRAMECRC, MP3, MP3, ARESAMPLE_FILTER WAV_MUXER MD5_PROTOCOL) += fate-gapless-mp3-itunes
+fate-gapless-mp3-itunes: CMD = gapless $(TARGET_SAMPLES)/gapless/gapless-itunes.mp3 "-c:a mp3"
+
+FATE_GAPLESSINFO_PROBE-$(call ALLYES, MP3_DEMUXER FILE_PROTOCOL) += fate-gapless-mp3-itunes-side-data
+fate-gapless-mp3-itunes-side-data: CMD = ffprobe_demux $(TARGET_SAMPLES)/gapless/gapless-itunes.mp3 -show_entries packet=pts:packet_side_data:stream=codec_name,start_pts,start_time,duration_ts,duration:format=start_time,duration
 
 FATE_GAPLESS-$(call DEMDEC, MP3, MP3, ARESAMPLE_FILTER WAV_MUXER) += fate-audiomatch-square-mp3
 fate-audiomatch-square-mp3: CMD = audio_match $(TARGET_SAMPLES)/audiomatch/square3.mp3 $(SAMPLES)/audiomatch/square3.wav

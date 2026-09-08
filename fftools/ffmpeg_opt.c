@@ -234,10 +234,10 @@ void opt_match_per_stream_ ## name(void *logctx, const SpecifierOptList *sol,   
         *out = sol->opt[ret - 1].u.m;                                                   \
 }
 
-OPT_MATCH_PER_STREAM(str,   const char *, OPT_TYPE_STRING, str);
-OPT_MATCH_PER_STREAM(int,   int,          OPT_TYPE_INT,    i);
-OPT_MATCH_PER_STREAM(int64, int64_t,      OPT_TYPE_INT64,  i64);
-OPT_MATCH_PER_STREAM(dbl,   double,       OPT_TYPE_DOUBLE, dbl);
+OPT_MATCH_PER_STREAM(str,   const char *, OPT_TYPE_STRING, str)
+OPT_MATCH_PER_STREAM(int,   int,          OPT_TYPE_INT,    i)
+OPT_MATCH_PER_STREAM(int64, int64_t,      OPT_TYPE_INT64,  i64)
+OPT_MATCH_PER_STREAM(dbl,   double,       OPT_TYPE_DOUBLE, dbl)
 
 static unsigned opt_match_per_stream_group(void *logctx, enum OptionType type,
                                            const SpecifierOptList *sol,
@@ -298,10 +298,10 @@ void opt_match_per_stream_group_ ## name(void *logctx, const SpecifierOptList *s
         *out = sol->opt[ret - 1].u.m;                                                        \
 }
 
-OPT_MATCH_PER_STREAM_GROUP(str,   const char *, OPT_TYPE_STRING, str);
-OPT_MATCH_PER_STREAM_GROUP(int,   int,          OPT_TYPE_INT,    i);
-OPT_MATCH_PER_STREAM_GROUP(int64, int64_t,      OPT_TYPE_INT64,  i64);
-OPT_MATCH_PER_STREAM_GROUP(dbl,   double,       OPT_TYPE_DOUBLE, dbl);
+OPT_MATCH_PER_STREAM_GROUP(str,   const char *, OPT_TYPE_STRING, str)
+OPT_MATCH_PER_STREAM_GROUP(int,   int,          OPT_TYPE_INT,    i)
+OPT_MATCH_PER_STREAM_GROUP(int64, int64_t,      OPT_TYPE_INT64,  i64)
+OPT_MATCH_PER_STREAM_GROUP(dbl,   double,       OPT_TYPE_DOUBLE, dbl)
 
 int view_specifier_parse(const char **pspec, ViewSpecifier *vs)
 {
@@ -831,13 +831,13 @@ int assert_file_overwrite(const char *filename)
                 signal(SIGINT, SIG_DFL);
                 if (!read_yesno()) {
                     av_log(NULL, AV_LOG_FATAL, "Not overwriting - exiting\n");
-                    return AVERROR_EXIT;
+                    return AVERROR(EEXIST);
                 }
                 term_init();
             }
             else {
                 av_log(NULL, AV_LOG_FATAL, "File '%s' already exists. Exiting.\n", filename);
-                return AVERROR_EXIT;
+                return AVERROR(EEXIST);
             }
         }
     }
@@ -1830,6 +1830,11 @@ const OptionDef options[] = {
     { "stats_mux_pre_fmt",  OPT_TYPE_STRING, OPT_PERSTREAM | OPT_EXPERT | OPT_OUTPUT,
         { .off = OFFSET(mux_stats_fmt)      },
         "format of the stats written with -stats_mux_pre" },
+
+    { "reinit_opts",        OPT_TYPE_STRING, OPT_PERSTREAM | OPT_EXPERT | OPT_OUTPUT,
+        { .off = OFFSET(enc_reinit_opts) },
+        "List of encoder options to use to reinitialize the encoder at given timestamps",
+        "pts1|video_size=size:g=12,pts2|video_size=size..." },
 
     /* video options */
     { "vframes",                    OPT_TYPE_FUNC,   OPT_VIDEO | OPT_FUNC_ARG | OPT_PERFILE | OPT_OUTPUT | OPT_EXPERT | OPT_HAS_CANON,

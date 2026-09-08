@@ -123,7 +123,7 @@ static int vk_av1_fill_pict(AVCodecContext *avctx, const AV1Frame **ref_src,
         .codedExtent = (VkExtent2D){ pic->f->width, pic->f->height },
         .baseArrayLayer = ((has_grain || dec->dedicated_dpb) && ctx->common.layered_dpb) ?
                           hp->frame_id : 0,
-        .imageViewBinding = vkpic->view.ref[0],
+        .imageViewBinding = vkpic->view.ref,
     };
 
     *ref_slot = (VkVideoReferenceSlotInfoKHR) {
@@ -208,7 +208,7 @@ static void vk_av1_params_fill(AVCodecContext *avctx,
     };
 }
 
-static int vk_av1_create_params(AVCodecContext *avctx, AVBufferRef **buf,
+static int vk_av1_create_params(AVCodecContext *avctx, VkVideoSessionParametersKHR **buf,
                                 AV1VulkanDecodePicture *ap)
 {
     int err;
@@ -361,7 +361,7 @@ static int vk_av1_start_frame(AVCodecContext          *avctx,
             .codedOffset = (VkOffset2D){ 0, 0 },
             .codedExtent = (VkExtent2D){ pic->f->width, pic->f->height },
             .baseArrayLayer = 0,
-            .imageViewBinding = vp->view.out[0],
+            .imageViewBinding = vp->view.out,
         },
     };
 
@@ -570,11 +570,11 @@ static int vk_av1_decode_slice(AVCodecContext *avctx,
     AV1VulkanDecodePicture *ap = s->cur_frame.hwaccel_picture_private;
     FFVulkanDecodePicture *vp = &ap->vp;
 
-    /* Too many tiles, exceeding all defined levels in the AV1 spec */
-    if (ap->av1_pic_info.tileCount > MAX_TILES)
-        return AVERROR(ENOSYS);
-
     for (int i = s->tg_start; i <= s->tg_end; i++) {
+        /* Too many tiles, exceeding all defined levels in the AV1 spec */
+        if (ap->av1_pic_info.tileCount >= MAX_TILES)
+            return AVERROR(ENOSYS);
+
         ap->tile_sizes[ap->av1_pic_info.tileCount] = s->tile_group_info[i].tile_size;
 
         err = ff_vk_decode_add_slice(avctx, vp,

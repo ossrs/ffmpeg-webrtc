@@ -7740,7 +7740,23 @@ The filter has following options:
 The file path of the downloaded whisper.cpp model (mandatory).
 
 @item language
-The language to use for transcription ('auto' for auto-detect).
+The language to use for transcription. Besides a language code, the following
+special values enable auto-detection:
+
+@table @samp
+@item eval
+Re-run language detection on every queued chunk. This costs an extra encoder
+pass per chunk and the detected language may change mid-file.
+
+@item lock
+Detect the language on the first chunk that produces transcribed text, then
+reuse it for the remaining chunks.
+
+@item auto
+Currently an alias for @samp{eval}. This may change in a future version, so use
+@samp{eval} or @samp{lock} if the behavior matters.
+@end table
+
 Default value: @code{"auto"}
 
 @item translate
@@ -9941,6 +9957,10 @@ premultiplied. Also detects if the alpha plane is fully opaque or not.
 Enable detection of all of the above properties. This is the default.
 @end table
 
+@item threshold
+Allow pixels to exceed the expected bounds by this fraction of the full scale
+value range before treating it as evidence of (respectively) full range or
+straight alpha. Value range is from 0 to 0.05. Defaults to 0.001 (=0.1%).
 @end table
 
 @section colorize
@@ -12160,7 +12180,15 @@ The filter accepts the following options:
 @table @option
 @item dnn_backend
 Specify which DNN backend to use for model loading and execution. This option accepts
-only openvino now, tensorflow backends will be added.
+the following values:
+@table @samp
+@item tensorflow
+TensorFlow backend.
+@item openvino
+OpenVINO backend.
+@item onnx
+ONNX Runtime backend.
+@end table
 
 @item model
 Set path to model file specifying network architecture and its parameters.
@@ -12170,7 +12198,9 @@ Note that different backends use different file formats.
 Set the input name of the dnn network.
 
 @item output
-Set the output name of the dnn network.
+Set the output name of the dnn network. The TensorFlow and ONNX Runtime
+backends accept multiple output names separated by @samp{&}, e.g.
+@option{output=yolo_13&yolo_26}.
 
 @item confidence
 Set the confidence threshold (default: 0.5).
@@ -12182,11 +12212,50 @@ The first line is the name of label id 0 (usually it is 'background'),
 and the second line is the name of label id 1, etc.
 The label id is considered as name if the label file is not provided.
 
+@item model_type
+Set the detection model output format. The following values are accepted:
+
+@table @samp
+@item ssd
+Single-stage detector (default).
+@item yolo
+YOLO v1/v2.
+@item yolov3
+YOLOv3.
+@item yolov4
+YOLOv4.
+@end table
+@item anchors
+Anchor box dimensions, separated by @samp{&}. Required for YOLO-family models.
+The list is consumed in output order, so the anchors of the first output come
+first: with @option{output=yolo_13&yolo_26} the leading pairs belong to
+@code{yolo_13}.
+@item nb_classes
+Number of detection classes. Required for YOLO-family models.
 @item backend_configs
 Set the configs to be passed into backend. To use async execution, set async (default: set).
 Roll back to sync execution if the backend does not support async.
 
 @end table
+
+@subsection Examples
+
+@itemize
+@item
+Run SSD object detection with an ONNX model (single output, DirectML on Windows):
+@example
+ffmpeg -i input.mp4 -vf "scale=300:300,format=rgb24,dnn_detect=dnn_backend=onnx
+       :model=ssd.onnx:model_type=ssd:confidence=0.5:device=dml" -f null -
+@end example
+
+@item
+Run YOLOv3 object detection with an ONNX model (two outputs, CPU):
+@example
+ffmpeg -i input.mp4 -vf "scale=416:416,format=rgb24,dnn_detect=dnn_backend=onnx
+       :model=yolov3.onnx:output=yolo_13&yolo_26:model_type=yolov3:nb_classes=80
+       :anchors=116&90&156&198&373&326&30&61&62&45&59&119" -f null -
+@end example
+@end itemize
 
 @anchor{dnn_processing}
 @section dnn_processing
@@ -12216,13 +12285,23 @@ need to build and install the OpenVINO for C library (see
 be needed if the header files and libraries are not installed into system path)
 
 @item torch
-Libtorch backend. To enable this backend you need to build and install Libtroch
+Libtorch backend. To enable this backend you need to build and install Libtorch
 for C++ library. Please download cxx11 ABI version (see
 @url{https://pytorch.org/get-started/locally})
 and configure FFmpeg with @code{--enable-libtorch
 --extra-cflags=-I/libtorch_root/libtorch/include
 --extra-cflags=-I/libtorch_root/libtorch/include/torch/csrc/api/include
 --extra-ldflags=-L/libtorch_root/libtorch/lib/}
+
+When FFmpeg is built with CUDA support and the input frames use
+@code{AV_PIX_FMT_CUDA} with an underlying pixel format of @code{rgb0},
+@code{bgr0}, @code{rgb24}, or @code{bgr24}, the Torch backend maps GPU
+frame buffers directly into LibTorch CUDA tensors using zero-copy memory
+mapping.  This avoids host-device PCIe transfers and can significantly
+reduce inference latency.  The zero-copy path is selected automatically
+when the input format qualifies; no additional options are required.
+When the input format is not @code{AV_PIX_FMT_CUDA}, the backend uses
+the standard CPU tensor path.
 
 @item onnx
 ONNX Runtime backend. To enable this backend you need to install the
@@ -12239,7 +12318,10 @@ exactly one input tensor when running the model.
 
 The @option{input} and @option{output} options are optional for the
 ONNX Runtime backend; when they are omitted the backend resolves the
-tensor names from the session.
+tensor names from the session.  Multiple output names may be supplied
+separated by @samp{&} (e.g. @option{output=out_a&out_b}); however for
+@code{dnn_processing} only the first output tensor is used for frame
+post-processing.
 
 The ONNX Runtime backend runs inference synchronously using a single
 inference request. The shared @option{async} and @option{nireq} options
@@ -12267,6 +12349,26 @@ Roll back to sync execution if the backend does not support async.
 
 For tensorflow backend, you can set its configs with @option{sess_config} options,
 please use tools/python/tf_sess_config.py to get the configs of TensorFlow backend for your system.
+
+@item async
+Use DNN async inference (default: 1).  When enabled, frames are submitted
+to the backend without blocking the caller.  Supported by the Torch,
+OpenVINO, and TensorFlow backends; the ONNX Runtime backend ignores
+this option.
+
+@item nireq
+Number of concurrent inference requests (default: 0, meaning auto).
+When set to 0, the backend automatically determines an appropriate
+number of requests.  Higher values increase throughput by allowing
+multiple frames to be in flight simultaneously.
+
+@item batch_size
+Number of frames to batch into a single inference request (default: 1).
+Values greater than 1 cause the backend to accumulate frames and
+concatenate them along the batch dimension before running the model.
+This can significantly increase throughput on GPUs at the cost of
+slightly higher per-frame latency.  Currently supported by the OpenVINO
+and Torch backends.
 
 @item device
 Set the device to run the model. For the ONNX Runtime backend this selects the
@@ -12304,6 +12406,32 @@ Handle the Y channel with espcn.pb (see @ref{sr} filter), which changes frame si
 please use tools/python/tf_sess_config.py to get the configs of TensorFlow backend for your system.
 @example
 ./ffmpeg -i 480p.jpg -vf format=yuv420p,dnn_processing=dnn_backend=tensorflow:model=espcn.pb:input=x:output=y:backend_configs=sess_config=0x10022805320e09cdccccccccccec3f20012a01303801 -y tmp.espcn.jpg
+@end example
+
+@item
+Perform zero-copy GPU inference with the Libtorch backend.  Because there
+is currently no GPU-side filter to convert from YUV to RGB,
+@code{hwupload} is used to upload CPU RGB frames into device memory.
+Once a GPU-side YUV-to-RGB filter becomes available, the @code{hwupload}
+step will no longer be necessary and all frames can stay in device memory
+throughout the pipeline:
+@example
+./ffmpeg -init_hw_device cuda=cuda -filter_hw_device cuda -i input.mp4 \
+  -vf "format=rgb24,hwupload,dnn_processing=dnn_backend=torch:model=my_model.pt,hwdownload,format=rgb0" \
+  -y output.mp4
+@end example
+
+@item
+Process rgb24 frames with a TorchScript model using the Libtorch backend:
+@example
+./ffmpeg -i input.jpg -vf format=rgb24,dnn_processing=dnn_backend=torch:model=my_model.pt output.jpg
+@end example
+
+@item
+Process rgb24 frames with the Libtorch backend using batch inference
+(four frames per request):
+@example
+./ffmpeg -i input.mp4 -vf format=rgb24,dnn_processing=dnn_backend=torch:model=my_model.pt:batch_size=4 -y output.mp4
 @end example
 
 @end itemize
@@ -27617,7 +27745,8 @@ Bicubic
 This is the default.
 
 @item lanczos
-Lanczos
+High-quality separable Lanczos (windowed sinc). The filter radius can be
+set with @option{param}; the default is 3.
 
 @end table
 
@@ -27639,12 +27768,13 @@ parameters. This is the default behaviour.
 If set to 1, filter with a generic weight LUT instead of using fixed-function
 shader kernels. May be faster or slower depending on the hardware. A value
 of @code{auto} (the default) enables this automatically when required for
-correct anti-aliasing when downscaling.
+correct anti-aliasing when downscaling, and for high-quality Lanczos scaling.
+Set this to 0 to use the legacy fixed 4-tap Lanczos kernel.
 
 @item param
-Algorithm-Specific parameter.
-
-Affects the curves of the bicubic algorithm.
+Algorithm-specific parameter. For @var{bicubic}, this affects the filter
+curve. For @var{lanczos}, this sets the filter radius from 1 to 10 (default 3)
+when using the generic filter path; it has no effect with @option{use_filters=0}.
 
 @item force_original_aspect_ratio
 @item force_divisible_by
@@ -29547,6 +29677,47 @@ Flips an image horizontally.
 @section flip_vulkan
 
 Flips an image along both the vertical and horizontal axis.
+
+@section fruc_vulkan
+
+Frame rate up-conversion using the NVIDIA Vulkan optical flow extension
+(@code{VK_NV_optical_flow}), implemented on the GPU using Vulkan.
+
+For each pair of consecutive input frames the filter computes a forward and
+backward optical flow field on the device's optical flow engine, and uses those
+fields to synthesise motion-compensated intermediate frames at the requested
+output frame rate. The frame timing logic mirrors the @code{framerate} filter.
+
+The majority of YUV and RGB pixel formats are supported. The exceptions are
+subsampled packed YUV formats such as @code{yuyv422} and @code{uyvy422},
+formats with more than 16 bits integer data per component, such as
+@code{rgb96} and @code{gray32}, and Bayer formats.
+
+@table @option
+@item fps
+A string describing the desired output frame rate, evaluated as an expression.
+The following constants are available: @code{source_fps}. The default value is
+@code{60}.
+
+@item perf
+Optical flow performance level, trading motion-estimation quality for speed.
+This is the dominant cost at high resolutions. Possible values are:
+@table @samp
+@item slow
+Highest quality, slowest. This is the default.
+@item medium
+Balanced quality and speed.
+@item fast
+Lowest quality, fastest.
+@end table
+
+@item grid
+Optical flow output grid size in pixels. A coarser grid computes fewer flow
+vectors, making it faster and less memory hungry at the cost of flow detail.
+Possible values are @code{auto} (the default; selects the finest grid the
+device supports, usually 1x1), @code{1}, @code{2}, @code{4} and @code{8}. Only
+grid sizes the device advertises are accepted.
+@end table
 
 @section gblur_vulkan
 

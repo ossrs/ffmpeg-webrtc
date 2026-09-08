@@ -92,6 +92,12 @@ fate-filter-anequalizer: tests/data/filtergraphs/anequalizer
 fate-filter-anequalizer: SRC = $(TARGET_PATH)/tests/data/asynth-44100-2.wav
 fate-filter-anequalizer: CMD = framecrc -auto_conversion_filters -i $(SRC) -/filter_complex $(TARGET_PATH)/tests/data/filtergraphs/anequalizer
 
+FATE_AFILTER-$(call FILTERDEMDECENCMUX, AFIR ARESAMPLE ATRIM, WAV, PCM_S16LE, PCM_S16LE, WAV) += fate-filter-afir-selir
+fate-filter-afir-selir: tests/data/asynth-44100-2.wav
+fate-filter-afir-selir: SRC = $(TARGET_PATH)/tests/data/asynth-44100-2.wav
+fate-filter-afir-selir: CMD = framecrc -auto_conversion_filters -i $(SRC) -i $(SRC) -filter_complex "[1:a]atrim=end=0.05[ir];[0:a][ir]afir=ir=1[aout]" -map "[aout]" -frames:a 1
+fate-filter-afir-selir: CMP = null
+
 FATE_AFILTER-$(call FILTERDEMDECENCMUX, ASETNSAMPLES, WAV, PCM_S16LE, PCM_S16LE, WAV) += fate-filter-asetnsamples-pad
 fate-filter-asetnsamples-pad: tests/data/asynth-44100-2.wav
 fate-filter-asetnsamples-pad: SRC = $(TARGET_PATH)/tests/data/asynth-44100-2.wav
@@ -190,6 +196,11 @@ FATE_AFILTER-$(call FILTERDEMDECENCMUX, PAN, WAV, PCM_S16LE, PCM_S16LE, WAV) += 
 fate-filter-pan-downmix2: tests/data/asynth-44100-11.wav
 fate-filter-pan-downmix2: SRC = $(TARGET_PATH)/tests/data/asynth-44100-11.wav
 fate-filter-pan-downmix2: CMD = framecrc -ss 3.14 -i $(SRC) -frames:a 20 -filter:a "pan=5C|c0=0.7*c0+0.7*c10|c1=c9|c2=c8|c3=c7|c4=c6"
+
+FATE_AFILTER-$(call ALLYES, LAVFI_INDEV ANULLSRC_FILTER PAN_FILTER PCM_S16LE_ENCODER NULL_MUXER) += fate-filter-pan-channel-id-limit
+fate-filter-pan-channel-id-limit: CMD = run $(FFMPEG) -nostdin -hide_banner -f lavfi -i "anullsrc=cl=stereo:r=44100:d=0.1" -af "pan=stereo|FL=UNK" -f null - ; true
+fate-filter-pan-channel-id-limit: CMP = grep
+fate-filter-pan-channel-id-limit: REF = Input channel id 768
 
 FATE_AFILTER-$(call ALLYES, LAVFI_INDEV AEVALSRC_FILTER SILENCEREMOVE_FILTER ARESAMPLE_FILTER) += fate-filter-silenceremove
 fate-filter-silenceremove: CMD = framecrc -auto_conversion_filters -f lavfi -i "aevalsrc=between(t\,1\,2)+between(t\,4\,5)+between(t\,7\,9):d=10:n=8192,silenceremove=start_periods=0:start_duration=0:start_threshold=0:stop_periods=-1:stop_duration=0:stop_threshold=-90dB:window=0:detection=avg"

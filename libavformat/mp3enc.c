@@ -100,6 +100,7 @@ static int id3v1_create_tag(AVFormatContext *s, uint8_t *buf)
 typedef struct MP3Context {
     const AVClass *class;
     ID3v2EncContext id3;
+    AVIOContext *id3_pb;
     int id3v2_version;
     int write_id3v1;
     int write_xing;
@@ -126,7 +127,7 @@ typedef struct MP3Context {
     int initial_bitrate;
     int has_variable_bitrate;
     int delay;
-    int padding;
+    int64_t padding;
 
     /* index of the audio stream */
     int audio_stream_idx;
@@ -367,9 +368,11 @@ static int mp3_write_audio_packet(AVFormatContext *s, AVPacket *pkt)
                                                 AV_PKT_DATA_SKIP_SAMPLES,
                                                 &side_data_size);
             if (side_data && side_data_size >= 10) {
-                mp3->padding = FFMAX(AV_RL32(side_data + 4) + 528 + 1, 0);
+                uint32_t discard_padding = AV_RL32(side_data + 4);
+                /* Padding longer than a frame is spread over several packets. */
+                mp3->padding = discard_padding ? mp3->padding + discard_padding : 0;
                 if (!mp3->delay)
-                    mp3->delay =  FFMAX(AV_RL32(side_data) - 528 - 1, 0);
+                    mp3->delay =  FFMAX((int64_t)AV_RL32(side_data) - 528 - 1, 0);
             } else {
                 mp3->padding = 0;
             }
@@ -379,14 +382,41 @@ static int mp3_write_audio_packet(AVFormatContext *s, AVPacket *pkt)
     return ff_raw_write_packet(s, pkt);
 }
 
+static int mp3_finish_id3v2(AVFormatContext *s)
+{
+    MP3Context *mp3 = s->priv_data;
+    AVIOContext *pb = mp3->id3_pb ? mp3->id3_pb : s->pb;
+    uint8_t *buf = NULL;
+    int ret, size;
+
+    ff_id3v2_finish(&mp3->id3, pb, s->metadata_header_padding);
+    ret = pb->error;
+
+    if (!mp3->id3_pb)
+        return ret;
+
+    size = avio_get_dyn_buf(mp3->id3_pb, &buf);
+    ret = mp3->id3_pb->error;
+    if (ret >= 0) {
+        avio_write(s->pb, buf, size);
+        ret = s->pb->error;
+    }
+    ffio_free_dyn_buf(&mp3->id3_pb);
+
+    return ret;
+}
+
 static int mp3_queue_flush(AVFormatContext *s)
 {
     MP3Context *mp3 = s->priv_data;
     AVPacket *const pkt = ffformatcontext(s)->pkt;
     int ret = 0, write = 1;
 
-    ff_id3v2_finish(&mp3->id3, s->pb, s->metadata_header_padding);
-    mp3_write_xing(s);
+    ret = mp3_finish_id3v2(s);
+    if (ret < 0)
+        write = 0;
+    else
+        mp3_write_xing(s);
 
     while (mp3->queue.head) {
         ff_packet_list_get(&mp3->queue, pkt);
@@ -449,6 +479,8 @@ static void mp3_update_xing(AVFormatContext *s)
     }
 
     /* write encoder delay/padding */
+    if (mp3->padding)
+        mp3->padding += 528 + 1;
     if (mp3->delay >= 1 << 12) {
         mp3->delay = (1 << 12) - 1;
         av_log(s, AV_LOG_WARNING, "Too many samples of initial padding.\n");
@@ -474,11 +506,13 @@ static int mp3_write_trailer(struct AVFormatContext *s)
 {
     uint8_t buf[ID3v1_TAG_SIZE];
     MP3Context *mp3 = s->priv_data;
+    int ret;
 
     if (mp3->pics_to_write) {
         av_log(s, AV_LOG_WARNING, "No packets were sent for some of the "
                "attached pictures.\n");
-        mp3_queue_flush(s);
+        if ((ret = mp3_queue_flush(s)) < 0)
+            return ret;
     }
 
     /* write the id3v1 tag */
@@ -536,12 +570,14 @@ static int mp3_write_packet(AVFormatContext *s, AVPacket *pkt)
             if (ret < 0) {
                 av_log(s, AV_LOG_WARNING, "Not enough memory to buffer audio. Skipping picture streams\n");
                 mp3->pics_to_write = 0;
-                mp3_queue_flush(s);
+                if ((ret = mp3_queue_flush(s)) < 0)
+                    return ret;
                 return mp3_write_audio_packet(s, pkt);
             }
         } else
             return mp3_write_audio_packet(s, pkt);
     } else {
+        AVIOContext *pb = mp3->id3_pb ? mp3->id3_pb : s->pb;
         int ret;
 
         /* warn only once for each stream */
@@ -552,8 +588,11 @@ static int mp3_write_packet(AVFormatContext *s, AVPacket *pkt)
         if (!mp3->pics_to_write || s->streams[pkt->stream_index]->nb_frames >= 1)
             return 0;
 
-        if ((ret = ff_id3v2_write_apic(s, &mp3->id3, pkt)) < 0)
+        ret = ff_id3v2_write_apic(s, pb, &mp3->id3, pkt);
+        if (ret < 0)
             return ret;
+        if (pb->error < 0)
+            return pb->error;
         mp3->pics_to_write--;
 
         /* flush the buffered audio packets */
@@ -617,18 +656,28 @@ static int mp3_init(struct AVFormatContext *s)
 static int mp3_write_header(struct AVFormatContext *s)
 {
     MP3Context  *mp3 = s->priv_data;
+    AVIOContext *pb = s->pb;
     int ret;
 
     if (mp3->id3v2_version) {
-        ff_id3v2_start(&mp3->id3, s->pb, mp3->id3v2_version, ID3v2_DEFAULT_MAGIC);
-        ret = ff_id3v2_write_metadata(s, &mp3->id3);
+        if (!(s->pb->seekable & AVIO_SEEKABLE_NORMAL)) {
+            ret = avio_open_dyn_buf(&mp3->id3_pb);
+            if (ret < 0)
+                return ret;
+            pb = mp3->id3_pb;
+        }
+
+        ff_id3v2_start(&mp3->id3, pb, mp3->id3v2_version, ID3v2_DEFAULT_MAGIC);
+        ret = ff_id3v2_write_metadata(s, pb, &mp3->id3);
         if (ret < 0)
             return ret;
+        if (pb->error < 0)
+            return pb->error;
     }
 
     if (!mp3->pics_to_write) {
-        if (mp3->id3v2_version)
-            ff_id3v2_finish(&mp3->id3, s->pb, s->metadata_header_padding);
+        if (mp3->id3v2_version && (ret = mp3_finish_id3v2(s)) < 0)
+            return ret;
         mp3_write_xing(s);
     }
 
@@ -640,6 +689,7 @@ static void mp3_deinit(struct AVFormatContext *s)
     MP3Context *mp3 = s->priv_data;
 
     ff_packet_list_free(&mp3->queue);
+    ffio_free_dyn_buf(&mp3->id3_pb);
     av_freep(&mp3->xing_frame);
 }
 

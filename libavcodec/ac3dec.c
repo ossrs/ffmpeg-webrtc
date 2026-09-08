@@ -51,6 +51,14 @@
 /** dynamic range table. converts codes to scale factors. */
 static float dynamic_range_tab[256];
 float ff_ac3_heavy_dynamic_range_tab[256];
+/** scale factor for each decoded exponent: 2^-exp */
+static const float scale_factors[25] = {
+    0x1p-0f,  0x1p-1f,  0x1p-2f,  0x1p-3f,  0x1p-4f,
+    0x1p-5f,  0x1p-6f,  0x1p-7f,  0x1p-8f,  0x1p-9f,
+    0x1p-10f, 0x1p-11f, 0x1p-12f, 0x1p-13f, 0x1p-14f,
+    0x1p-15f, 0x1p-16f, 0x1p-17f, 0x1p-18f, 0x1p-19f,
+    0x1p-20f, 0x1p-21f, 0x1p-22f, 0x1p-23f, 0x1p-24f,
+};
 
 /*
  * Initialize tables at runtime.
@@ -115,7 +123,6 @@ static av_cold int ac3_decode_init(AVCodecContext *avctx)
 #if (USE_FIXED)
     s->fdsp = avpriv_alloc_fixed_dsp(avctx->flags & AV_CODEC_FLAG_BITEXACT);
 #else
-    ff_fmt_convert_init(&s->fmt_conv);
     s->fdsp = avpriv_float_dsp_alloc(avctx->flags & AV_CODEC_FLAG_BITEXACT);
 #endif
     if (!s->fdsp)
@@ -363,14 +370,22 @@ static void calc_transform_coeffs_cpl(AC3DecodeContext *s)
         int band_end = bin + s->cpl_band_sizes[band];
         for (ch = 1; ch <= s->fbw_channels; ch++) {
             if (s->channel_in_cpl[ch]) {
+#if USE_FIXED
                 int cpl_coord = s->cpl_coords[ch][band] << 5;
+#else
+                float cpl_coord = s->cpl_coords[ch][band] * (1.0f / (1 << 23));
+#endif
                 for (bin = band_start; bin < band_end; bin++) {
-                    s->fixed_coeffs[ch][bin] =
-                        MULH(s->fixed_coeffs[CPL_CH][bin] * (1 << 4), cpl_coord);
+#if USE_FIXED
+                    s->coeffs[ch][bin] =
+                        MULH(s->coeffs[CPL_CH][bin] * (1 << 4), cpl_coord);
+#else
+                    s->coeffs[ch][bin] = s->coeffs[CPL_CH][bin] * cpl_coord;
+#endif
                 }
                 if (ch == 2 && s->phase_flags[band]) {
                     for (bin = band_start; bin < band_end; bin++)
-                        s->fixed_coeffs[2][bin] = -s->fixed_coeffs[2][bin];
+                        s->coeffs[2][bin] = -s->coeffs[2][bin];
                 }
             }
         }
@@ -390,6 +405,26 @@ typedef struct mant_groups {
     int b4;
 } mant_groups;
 
+static av_always_inline INTFLOAT dequantize_coeff(int mantissa, int exponent,
+                                                  int coeff_bits)
+{
+#if USE_FIXED
+    return (mantissa * (1 << coeff_bits)) >> exponent;
+#else
+    return mantissa * scale_factors[exponent];
+#endif
+}
+
+#if USE_FIXED
+static av_always_inline int dequantize_dexp24_dither(int mantissa)
+{
+    int scaled = mantissa * (1 << AC3_FIXED_COEFF_BITS);
+    int round  = 1 << (AC3_FIXED_EXPONENT_MAX - 1);
+
+    return (scaled + round - (scaled < 0)) >> AC3_FIXED_EXPONENT_MAX;
+}
+#endif
+
 /**
  * Decode the transform coefficients for a particular channel
  * reference: Section 7.3 Quantization and Decoding of Mantissas
@@ -400,8 +435,13 @@ static void ac3_decode_transform_coeffs_ch(AC3DecodeContext *s, int ch_index, ma
     int end_freq   = s->end_freq[ch_index];
     uint8_t *baps  = s->bap[ch_index];
     int8_t *exps   = s->dexps[ch_index];
-    int32_t *coeffs = s->fixed_coeffs[ch_index];
+    INTFLOAT *coeffs = s->coeffs[ch_index];
     int dither     = (ch_index == CPL_CH) || s->dither_flag[ch_index];
+#if USE_FIXED
+    int coeff_bits = fixed_coeff_bits(s);
+#else
+    int coeff_bits = 0;
+#endif
     GetBitContext *gbc = &s->gbc;
     int freq;
 
@@ -411,10 +451,19 @@ static void ac3_decode_transform_coeffs_ch(AC3DecodeContext *s, int ch_index, ma
         switch (bap) {
         case 0:
             /* random noise with approximate range of -0.707 to 0.707 */
-            if (dither)
+            if (dither) {
                 mantissa = (((av_lfg_get(&s->dith_state)>>8)*181)>>8) - 5931008;
-            else
+#if USE_FIXED
+                /* At dexp 24 the dither is below half a Q0 step. Keep two
+                 * fractional bits so it is not truncated to -1 or 0. */
+                if (coeff_bits && exps[freq] == AC3_FIXED_EXPONENT_MAX) {
+                    coeffs[freq] = dequantize_dexp24_dither(mantissa);
+                    continue;
+                }
+#endif
+            } else {
                 mantissa = 0;
+            }
             break;
         case 1:
             if (m->b1) {
@@ -466,7 +515,7 @@ static void ac3_decode_transform_coeffs_ch(AC3DecodeContext *s, int ch_index, ma
             mantissa = (unsigned)get_sbits(gbc, ff_ac3_quantization_tab[bap]) << (24 - ff_ac3_quantization_tab[bap]);
             break;
         }
-        coeffs[freq] = mantissa >> exps[freq];
+        coeffs[freq] = dequantize_coeff(mantissa, exps[freq], coeff_bits);
     }
 }
 
@@ -482,7 +531,7 @@ static void remove_dithering(AC3DecodeContext *s) {
         if (!s->dither_flag[ch] && s->channel_in_cpl[ch]) {
             for (i = s->start_freq[CPL_CH]; i < s->end_freq[CPL_CH]; i++) {
                 if (!s->bap[CPL_CH][i])
-                    s->fixed_coeffs[ch][i] = 0;
+                    s->coeffs[ch][i] = 0;
             }
         }
     }
@@ -500,7 +549,8 @@ static inline void decode_transform_coeffs_ch(AC3DecodeContext *s, int blk,
         if (CONFIG_EAC3_DECODER && !blk)
             ff_eac3_decode_transform_coeffs_aht_ch(s, ch);
         for (bin = s->start_freq[ch]; bin < s->end_freq[ch]; bin++) {
-            s->fixed_coeffs[ch][bin] = s->pre_mantissa[ch][bin][blk] >> s->dexps[ch][bin];
+            s->coeffs[ch][bin] = dequantize_coeff(
+                s->pre_mantissa[ch][bin][blk], s->dexps[ch][bin], 0);
         }
     }
 }
@@ -532,7 +582,7 @@ static inline void decode_transform_coeffs(AC3DecodeContext *s, int blk)
             end = s->end_freq[ch];
         }
         do
-            s->fixed_coeffs[ch][end] = 0;
+            s->coeffs[ch][end] = 0;
         while (++end < 256);
     }
 
@@ -555,9 +605,9 @@ static void do_rematrixing(AC3DecodeContext *s)
         if (s->rematrixing_flags[bnd]) {
             bndend = FFMIN(end, ff_ac3_rematrix_band_tab[bnd + 1]);
             for (i = ff_ac3_rematrix_band_tab[bnd]; i < bndend; i++) {
-                int tmp0 = s->fixed_coeffs[1][i];
-                s->fixed_coeffs[1][i] += s->fixed_coeffs[2][i];
-                s->fixed_coeffs[2][i]  = tmp0 - s->fixed_coeffs[2][i];
+                INTFLOAT tmp0 = s->coeffs[1][i];
+                s->coeffs[1][i] += s->coeffs[2][i];
+                s->coeffs[2][i]  = tmp0 - s->coeffs[2][i];
             }
         }
     }
@@ -571,6 +621,9 @@ static void do_rematrixing(AC3DecodeContext *s)
 static inline void do_imdct(AC3DecodeContext *s, int channels, int offset)
 {
     int ch;
+#if USE_FIXED
+    int window_bits = 8 + fixed_coeff_bits(s);
+#endif
 
     for (ch = 1; ch <= channels; ch++) {
         if (s->block_switch[ch]) {
@@ -581,7 +634,7 @@ static inline void do_imdct(AC3DecodeContext *s, int channels, int offset)
             s->tx_fn_128(s->tx_128, s->tmp_output, x, sizeof(INTFLOAT));
 #if USE_FIXED
             s->fdsp->vector_fmul_window_scaled(s->outptr[ch - 1], s->delay[ch - 1 + offset],
-                                       s->tmp_output, s->window, 128, 8);
+                                       s->tmp_output, s->window, 128, window_bits);
 #else
             s->fdsp->vector_fmul_window(s->outptr[ch - 1], s->delay[ch - 1 + offset],
                                        s->tmp_output, s->window, 128);
@@ -593,7 +646,7 @@ static inline void do_imdct(AC3DecodeContext *s, int channels, int offset)
             s->tx_fn_256(s->tx_256, s->tmp_output, s->transform_coeffs[ch], sizeof(INTFLOAT));
 #if USE_FIXED
             s->fdsp->vector_fmul_window_scaled(s->outptr[ch - 1], s->delay[ch - 1 + offset],
-                                       s->tmp_output, s->window, 128, 8);
+                                       s->tmp_output, s->window, 128, window_bits);
 #else
             s->fdsp->vector_fmul_window(s->outptr[ch - 1], s->delay[ch - 1 + offset],
                                        s->tmp_output, s->window, 128);
@@ -1287,13 +1340,17 @@ static int decode_audio_block(AC3DecodeContext *s, int blk, int offset)
             gain = s->dynamic_range[audio_channel];
 
 #if USE_FIXED
-        scale_coefs(s->transform_coeffs[ch], s->fixed_coeffs[ch], gain, 256);
+        if (fixed_coeff_bits(s))
+            scale_coefs_q2(s->transform_coeffs[ch], s->coeffs[ch], gain,
+                           256);
+        else
+            scale_coefs(s->transform_coeffs[ch], s->coeffs[ch], gain, 256);
 #else
         if (s->target_level != 0)
           gain = gain * s->level_gain[audio_channel];
-        gain *= 1.0 / 4194304.0f;
-        s->fmt_conv.int32_to_float_fmul_scalar(s->transform_coeffs[ch],
-                                               s->fixed_coeffs[ch], gain, 256);
+        gain *= 1.0f / 4194304.0f;
+        s->fdsp->vector_fmul_scalar(s->transform_coeffs[ch], s->coeffs[ch],
+                                    gain, 256);
 #endif
     }
 
@@ -1518,6 +1575,23 @@ dependent_frame:
     /* decode the audio blocks */
     channel_map = ff_ac3_dec_channel_map[s->output_mode & ~AC3_OUTPUT_LFEON][s->lfe_on];
     offset = s->frame_type == EAC3_FRAME_TYPE_DEPENDENT ? AC3_MAX_CHANNELS : 0;
+#if USE_FIXED
+    /* delay[] holds overlap samples scaled by the coefficient format that was
+     * in use when they were produced. The independent and the dependent
+     * substream own disjoint delay slots and may legitimately use different
+     * formats, so only drop the overlap of the substream whose format really
+     * changed, as happens when a malformed or explicitly forced stream
+     * switches between E-AC-3 and AC-3. */
+    if (!err) {
+        const int coeff_bits = fixed_coeff_bits(s);
+        const int slot       = offset ? 1 : 0;
+
+        if (s->delay_coeff_bits[slot] != coeff_bits) {
+            memset(s->delay[offset], 0, AC3_MAX_CHANNELS * sizeof(s->delay[0]));
+            s->delay_coeff_bits[slot] = coeff_bits;
+        }
+    }
+#endif
     for (ch = 0; ch < AC3_MAX_CHANNELS; ch++) {
         output[ch] = s->output[ch + offset];
         s->outptr[ch] = s->output[ch + offset];

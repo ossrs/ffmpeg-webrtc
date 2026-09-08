@@ -22,6 +22,7 @@
 #include "config.h"
 
 #include "libavutil/log.h"
+#include "libavutil/pixfmt.h"
 
 #include <stdint.h>
 #if CONFIG_LIBLCEVC_DEC
@@ -39,6 +40,7 @@ typedef struct FFLCEVCContext {
     struct CodedBitstreamContext *cbc;
     struct CodedBitstreamFragment *frag;
     struct AVRefStructPool *frame_pool; ///< pool of FFLCEVCFrame
+    int64_t last_pts;
     int loglevel;
     int initialized;
 } FFLCEVCContext;

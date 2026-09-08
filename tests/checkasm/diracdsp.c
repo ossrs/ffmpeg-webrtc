@@ -18,6 +18,8 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#include <string.h>
+
 #include "checkasm.h"
 
 #include "libavcodec/diracdsp.h"
@@ -66,7 +68,8 @@ static void check_add_obmc(size_t func_index, int xblen)
     ff_diracdsp_init(&h);
 
     if (check_func(h.add_dirac_obmc[func_index], "diracdsp.add_dirac_obmc_%d", xblen)) {
-        declare_func(void, uint16_t*, const uint8_t*, int, const uint8_t *, int);
+        declare_func(void, uint16_t *dst, const uint8_t *src, ptrdiff_t stride,
+                           const uint8_t *obmc_weight, int yblen);
 
         RANDOMIZE_BUFFER8(src, YBLEN_MAX * xblen);
         RANDOMIZE_DESTS(dst, YBLEN_MAX * xblen);

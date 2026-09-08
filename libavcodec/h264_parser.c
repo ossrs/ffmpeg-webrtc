@@ -314,6 +314,7 @@ static inline int parse_nal_units(AVCodecParserContext *s,
         switch (state & 0x1f) {
         case H264_NAL_SLICE:
         case H264_NAL_IDR_SLICE:
+        case H264_NAL_DPA:
             // Do not walk the whole buffer just to decode slice header
             if ((state & 0x1f) == H264_NAL_IDR_SLICE || ((state >> 5) & 0x3) == 0) {
                 /* IDR or disposable slice
@@ -360,6 +361,7 @@ static inline int parse_nal_units(AVCodecParserContext *s,
             p->poc.prev_poc_lsb          = 0;
             av_fallthrough;
         case H264_NAL_SLICE:
+        case H264_NAL_DPA:                // starts with a slice header too
             get_ue_golomb_long(&nal.gb);  // skip first_mb_in_slice
             slice_type   = get_ue_golomb_31(&nal.gb);
             s->pict_type = ff_h264_golomb_to_pict_type[slice_type % 5];
@@ -423,6 +425,7 @@ static inline int parse_nal_units(AVCodecParserContext *s,
 
             if (sps->frame_mbs_only_flag) {
                 p->picture_structure = PICT_FRAME;
+                s->field_order = AV_FIELD_PROGRESSIVE;
             } else {
                 if (get_bits1(&nal.gb)) { // field_pic_flag
                     p->picture_structure = PICT_TOP_FIELD + get_bits1(&nal.gb); // bottom_field_flag
@@ -541,8 +544,11 @@ static inline int parse_nal_units(AVCodecParserContext *s,
                         s->field_order = AV_FIELD_TT;
                     else if (field_poc[0] > field_poc[1])
                         s->field_order = AV_FIELD_BB;
-                    else
-                        s->field_order = AV_FIELD_PROGRESSIVE;
+                    else if (sps->mb_aff) {
+                        /* Default to top field first
+                         * This is the same as what the decoder does */
+                        s->field_order = AV_FIELD_TT;
+                    }
                 }
             } else {
                 if (p->picture_structure == PICT_TOP_FIELD)

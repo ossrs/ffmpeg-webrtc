@@ -7,6 +7,39 @@ fate-mkdir: libavformat/tests/mkdir$(EXESUF)
 fate-mkdir: CMD = run libavformat/tests/mkdir$(EXESUF)
 fate-mkdir: CMP = null
 
+FATE_LIBAVFORMAT += fate-rename
+fate-rename: libavformat/tests/rename$(EXESUF)
+fate-rename: CMD = run libavformat/tests/rename$(EXESUF)
+fate-rename: CMP = null
+
+FATE_HTTP_STATUS_LINES = \
+    "HTTP/1.1 200 OK"                    \
+    "HTTP/1.0 200 OK"                    \
+    "HTTP/1.1 404 Not Found"             \
+    "HTTP/1.1 500 Internal Server Error" \
+    "HTTP/1.1 204 No Content"            \
+    "HTTP/1.1 200"                       \
+    "HTTP/1.1"                           \
+    "HTTP/1.1 OK"                        \
+    "HTTP"                               \
+    "200 OK"                             \
+    "NOT A STATUS LINE"                  \
+    ""                                   \
+    "ICY 200 OK"                         \
+    "ICY 404 Not Found"                  \
+    "HTTP/1.1 200OK"                     \
+    "HTTP/1.1 +200 Plus"                 \
+    "HTTP/1.1 20 Short"                  \
+    "HTTP/1.1 2000 Four"                 \
+    "HTTP/x 200 Bad version"             \
+    "http/1.1 200 lowercase"             \
+    "HTTP/1.1 099 Too low"               \
+    "HTTP/1.1 600 Too high"
+
+FATE_LIBAVFORMAT-$(CONFIG_HTTP_PROTOCOL) += fate-http-status-line
+fate-http-status-line: libavformat/tests/http$(EXESUF)
+fate-http-status-line: CMD = run libavformat/tests/http$(EXESUF) $(FATE_HTTP_STATUS_LINES)
+
 FATE_LIBAVFORMAT-$(CONFIG_NETWORK) += fate-noproxy
 fate-noproxy: libavformat/tests/noproxy$(EXESUF)
 fate-noproxy: CMD = run libavformat/tests/noproxy$(EXESUF)
@@ -22,10 +55,6 @@ fate-srtp: CMD = run libavformat/tests/srtp$(EXESUF)
 FATE_LIBAVFORMAT-yes += fate-url
 fate-url: libavformat/tests/url$(EXESUF)
 fate-url: CMD = run libavformat/tests/url$(EXESUF)
-
-FATE_LIBAVFORMAT-$(call ALLYES, MP4_MUXER ISMV_MUXER) += fate-movenc
-fate-movenc: libavformat/tests/movenc$(EXESUF)
-fate-movenc: CMD = run libavformat/tests/movenc$(EXESUF)
 
 FATE_LIBAVFORMAT-$(CONFIG_IMF_DEMUXER) += fate-imf
 fate-imf: libavformat/tests/imf$(EXESUF)

@@ -39,10 +39,13 @@ FATE_MOV_FFPROBE-$(call FRAMEMD5, MOV, H264, H264_PARSER) += fate-mov-neg-firstp
                    fate-mov-mp4-with-mov-in24-ver \
                    fate-mov-mime-codecstring \
                    fate-mov-t35-cdsc-track \
+                   fate-mov-t35-rndr-track \
 
 FATE_MOV_FFPROBE-$(call FRAMEMD5, MOV, MPEG4, H264_PARSER) += fate-mov-mp4-extended-atom \
 
 FATE_MOV_FFPROBE-$(call DEMDEC, MOV, HEVC) += fate-mov-dovi-hvce-mp4-read
+
+FATE_MOV_FFPROBE-$(call DEMDEC, MOV, H264) += fate-mov-vfr-bframes-duration
 
 FATE_MOV_FASTSTART = fate-mov-faststart-4gb-overflow \
 
@@ -148,6 +151,8 @@ fate-mov-spherical-mono: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_entries str
 
 fate-mov-dovi-hvce-mp4-read: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_entries stream_side_data_list -select_streams v -v 0 $(TARGET_SAMPLES)/mov/dovi-p7-hvce.mp4
 
+fate-mov-vfr-bframes-duration: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_packets -show_entries packet=pts,dts,duration -print_format compact -select_streams v -v 0 $(TARGET_SAMPLES)/mov/vfr-7-12-1-sequence.mp4
+
 fate-mov-gpmf-remux: CMD = md5 -i $(TARGET_SAMPLES)/mov/fake-gp-media-with-real-gpmf.mp4 -map 0 -c copy -fflags +bitexact -f mp4
 fate-mov-gpmf-remux: CMP = oneline
 fate-mov-gpmf-remux: REF = e919915c5cd22c849e2aba281ddaf0c8
@@ -167,6 +172,8 @@ fate-mov-mp4-extended-atom: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_packets 
 fate-mov-mime-codecstring: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_entries stream=mime_codec_string -v 0 $(TARGET_SAMPLES)/mov/mov_stream_shorter_than_movie.mov
 
 fate-mov-t35-cdsc-track: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_entries stream_group=index,id,nb_streams,type:stream_group_stream=index,id,codec_name,codec_type,codec_tag_string,extradata_size $(TARGET_SAMPLES)/mov/mov-t35-cdsc-track.mp4
+
+fate-mov-t35-rndr-track: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_entries stream_group=index,id,nb_streams,type:stream_group_stream=index,id,codec_name,codec_type,codec_tag_string,extradata_size $(TARGET_SAMPLES)/mov/mov-t35-rndr-track.mp4
 
 FATE_MOV_FFMPEG_FFPROBE_SAMPLES-$(call REMUX, MP4 MOV, OGG_DEMUXER VORBIS_DECODER) \
                           += fate-mov-mp4-chapters
@@ -302,6 +309,23 @@ fate-mov-vfr: CMD = md5 -filter_complex testsrc=size=2x2:duration=1,setpts=N*N:s
 fate-mov-vfr: CMP = oneline
 fate-mov-vfr: REF = 1558b4a9398d8635783c93f84eb5a60d
 
+FATE_MOV_FFMPEG_FFPROBE-$(call ALLYES, COLOR_FILTER SETPTS_FILTER MPEG4_ENCODER \
+                                      MOV_MUXER MOV_DEMUXER FILE_PROTOCOL)      \
+                                      += fate-mov-vfr-bframes-derived-duration
+
+# Create VFR B-frames whose presentation durations are not a permutation of
+# the STTS sample deltas.
+tests/data/mov-vfr-bframes-derived-duration.mov: TAG = GEN
+tests/data/mov-vfr-bframes-derived-duration.mov: ffmpeg$(PROGSSUF)$(EXESUF) | tests/data
+	$(M)$(TARGET_EXEC) $(TARGET_PATH)/$< -nostdin -v error \
+	    -filter_complex "color=c=black:s=2x2:r=1,setpts=N+N*N" \
+	    -frames:v 3 -fps_mode vfr -c:v mpeg4 -bf 2 -q:v 2 -threads 1 \
+	    -flags +bitexact -fflags +bitexact \
+	    -f mov $(TARGET_PATH)/$@ -y
+
+fate-mov-vfr-bframes-derived-duration: tests/data/mov-vfr-bframes-derived-duration.mov
+fate-mov-vfr-bframes-derived-duration: CMD = run ffprobe$(PROGSSUF)$(EXESUF) -show_packets -show_entries packet=pts,dts,duration -print_format compact -select_streams v -v 0 $(TARGET_PATH)/tests/data/mov-vfr-bframes-derived-duration.mov
+
 FATE_MOV_FFMPEG_FFPROBE-$(call TRANSCODE, FLAC, MP4 MOV, WAV_DEMUXER PCM_S16LE_DECODER) += fate-mov-mp4-iamf-stereo
 fate-mov-mp4-iamf-stereo: tests/data/asynth-44100-2.wav tests/data/streamgroups/audio_element-stereo tests/data/streamgroups/mix_presentation-stereo
 fate-mov-mp4-iamf-stereo: SRC = $(TARGET_PATH)/tests/data/asynth-44100-2.wav
@@ -390,7 +414,7 @@ fate-mov-reenc-delete-format-metadata: CMD = transcode mov $(TARGET_SAMPLES)/cov
 
 # audio-only format tags (gapless_playback, iTunSMPB, iTunNORM) must survive when
 # only the cover-art video stream is re-encoded and the audio is stream-copied
-FATE_MOV_FFMPEG_FFPROBE-$(call ENCDEC, PNG, NUT MOV) += fate-mov-cover-reenc-keeps-audio-format-tags
+FATE_MOV_FFMPEG_FFPROBE-$(call ENCDEC, PNG MJPEG, NUT MOV, SCALE_FILTER) += fate-mov-cover-reenc-keeps-audio-format-tags
 fate-mov-cover-reenc-keeps-audio-format-tags: CMD = transcode mov $(TARGET_SAMPLES)/cover_art/Owner-iTunes_9.0.3.15.m4a nut "-map 0:a:0 -c:a copy -map 0:v:0 -filter:v scale -c:v png -bitexact -t 0.1" "-c copy -t 0.1" "-show_entries format_tags" "" "" "" null
 
 # stream-level branding: vendor_id should be deleted on re-encode

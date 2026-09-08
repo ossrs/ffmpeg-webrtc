@@ -94,6 +94,10 @@ FATE_LIBAVUTIL += fate-dovi_meta
 fate-dovi_meta: libavutil/tests/dovi_meta$(EXESUF)
 fate-dovi_meta: CMD = run libavutil/tests/dovi_meta$(EXESUF)
 
+FATE_LIBAVUTIL += fate-downmix_info
+fate-downmix_info: libavutil/tests/downmix_info$(EXESUF)
+fate-downmix_info: CMD = run libavutil/tests/downmix_info$(EXESUF)
+
 FATE_LIBAVUTIL += fate-encryption-info
 fate-encryption-info: libavutil/tests/encryption_info$(EXESUF)
 fate-encryption-info: CMD = run libavutil/tests/encryption_info$(EXESUF)
@@ -114,6 +118,10 @@ fate-film_grain_params: CMD = run libavutil/tests/film_grain_params$(EXESUF)
 FATE_LIBAVUTIL += fate-hash
 fate-hash: libavutil/tests/hash$(EXESUF)
 fate-hash: CMD = run libavutil/tests/hash$(EXESUF)
+
+FATE_LIBAVUTIL += fate-hdr_dynamic_metadata
+fate-hdr_dynamic_metadata: libavutil/tests/hdr_dynamic_metadata$(EXESUF)
+fate-hdr_dynamic_metadata: CMD = run libavutil/tests/hdr_dynamic_metadata$(EXESUF)
 
 FATE_LIBAVUTIL += fate-hdr_dynamic_vivid_metadata
 fate-hdr_dynamic_vivid_metadata: libavutil/tests/hdr_dynamic_vivid_metadata$(EXESUF)
@@ -156,6 +164,10 @@ FATE_LIBAVUTIL += fate-parseutils
 fate-parseutils: libavutil/tests/parseutils$(EXESUF)
 fate-parseutils: CMD = run libavutil/tests/parseutils$(EXESUF)
 
+FATE_LIBAVUTIL += fate-pixdesc
+fate-pixdesc: libavutil/tests/pixdesc$(EXESUF)
+fate-pixdesc: CMD = run libavutil/tests/pixdesc$(EXESUF)
+
 FATE_LIBAVUTIL-$(CONFIG_PIXELUTILS) += fate-pixelutils
 fate-pixelutils: libavutil/tests/pixelutils$(EXESUF)
 fate-pixelutils: CMD = run libavutil/tests/pixelutils$(EXESUF)
@@ -191,6 +203,10 @@ fate-sha512: CMD = run libavutil/tests/sha512$(EXESUF)
 FATE_LIBAVUTIL += fate-samplefmt
 fate-samplefmt: libavutil/tests/samplefmt$(EXESUF)
 fate-samplefmt: CMD = run libavutil/tests/samplefmt$(EXESUF)
+
+FATE_LIBAVUTIL += fate-side_data
+fate-side_data: libavutil/tests/side_data$(EXESUF)
+fate-side_data: CMD = run libavutil/tests/side_data$(EXESUF)
 
 FATE_LIBAVUTIL += fate-side_data_array
 fate-side_data_array: libavutil/tests/side_data_array$(EXESUF)

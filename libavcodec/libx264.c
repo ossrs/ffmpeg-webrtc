@@ -192,54 +192,64 @@ static int encode_nals(AVCodecContext *ctx, AVPacket *pkt,
     return 1;
 }
 
-static void reconfig_encoder(AVCodecContext *ctx, const AVFrame *frame)
+static void reconfig_encoder(AVCodecContext *ctx)
+{
+    X264Context *x4 = ctx->priv_data;
+
+    if (x4->avcintra_class >= 0)
+        return;
+
+    if (x4->params.vui.i_sar_height*ctx->sample_aspect_ratio.num != ctx->sample_aspect_ratio.den * x4->params.vui.i_sar_width) {
+        x4->params.vui.i_sar_height = ctx->sample_aspect_ratio.den;
+        x4->params.vui.i_sar_width  = ctx->sample_aspect_ratio.num;
+        x264_encoder_reconfig(x4->enc, &x4->params);
+    }
+
+    if (x4->params.rc.i_vbv_buffer_size != ctx->rc_buffer_size / 1000 ||
+        x4->params.rc.i_vbv_max_bitrate != ctx->rc_max_rate    / 1000) {
+        x4->params.rc.i_vbv_buffer_size = ctx->rc_buffer_size / 1000;
+        x4->params.rc.i_vbv_max_bitrate = ctx->rc_max_rate    / 1000;
+        x264_encoder_reconfig(x4->enc, &x4->params);
+    }
+
+    if (x4->params.rc.i_rc_method == X264_RC_ABR &&
+        x4->params.rc.i_bitrate != ctx->bit_rate / 1000) {
+        x4->params.rc.i_bitrate = ctx->bit_rate / 1000;
+        x264_encoder_reconfig(x4->enc, &x4->params);
+    }
+
+    if (x4->crf >= 0 &&
+        x4->params.rc.i_rc_method == X264_RC_CRF &&
+        x4->params.rc.f_rf_constant != x4->crf) {
+        x4->params.rc.f_rf_constant = x4->crf;
+        x264_encoder_reconfig(x4->enc, &x4->params);
+    }
+
+    if (x4->params.rc.i_rc_method == X264_RC_CQP &&
+        x4->cqp >= 0 &&
+        x4->params.rc.i_qp_constant != x4->cqp) {
+        x4->params.rc.i_qp_constant = x4->cqp;
+        x264_encoder_reconfig(x4->enc, &x4->params);
+    }
+
+    if (x4->crf_max >= 0 &&
+        x4->params.rc.f_rf_constant_max != x4->crf_max) {
+        x4->params.rc.f_rf_constant_max = x4->crf_max;
+        x264_encoder_reconfig(x4->enc, &x4->params);
+    }
+}
+
+static void reconfig_encoder_from_frame(AVCodecContext *ctx, const AVFrame *frame)
 {
     X264Context *x4 = ctx->priv_data;
     AVFrameSideData *side_data;
 
+    reconfig_encoder(ctx);
 
     if (x4->avcintra_class < 0) {
         if (x4->params.b_interlaced && x4->params.b_tff != !!(frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST)) {
 
             x4->params.b_tff = !!(frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
-            x264_encoder_reconfig(x4->enc, &x4->params);
-        }
-        if (x4->params.vui.i_sar_height*ctx->sample_aspect_ratio.num != ctx->sample_aspect_ratio.den * x4->params.vui.i_sar_width) {
-            x4->params.vui.i_sar_height = ctx->sample_aspect_ratio.den;
-            x4->params.vui.i_sar_width  = ctx->sample_aspect_ratio.num;
-            x264_encoder_reconfig(x4->enc, &x4->params);
-        }
-
-        if (x4->params.rc.i_vbv_buffer_size != ctx->rc_buffer_size / 1000 ||
-            x4->params.rc.i_vbv_max_bitrate != ctx->rc_max_rate    / 1000) {
-            x4->params.rc.i_vbv_buffer_size = ctx->rc_buffer_size / 1000;
-            x4->params.rc.i_vbv_max_bitrate = ctx->rc_max_rate    / 1000;
-            x264_encoder_reconfig(x4->enc, &x4->params);
-        }
-
-        if (x4->params.rc.i_rc_method == X264_RC_ABR &&
-            x4->params.rc.i_bitrate != ctx->bit_rate / 1000) {
-            x4->params.rc.i_bitrate = ctx->bit_rate / 1000;
-            x264_encoder_reconfig(x4->enc, &x4->params);
-        }
-
-        if (x4->crf >= 0 &&
-            x4->params.rc.i_rc_method == X264_RC_CRF &&
-            x4->params.rc.f_rf_constant != x4->crf) {
-            x4->params.rc.f_rf_constant = x4->crf;
-            x264_encoder_reconfig(x4->enc, &x4->params);
-        }
-
-        if (x4->params.rc.i_rc_method == X264_RC_CQP &&
-            x4->cqp >= 0 &&
-            x4->params.rc.i_qp_constant != x4->cqp) {
-            x4->params.rc.i_qp_constant = x4->cqp;
-            x264_encoder_reconfig(x4->enc, &x4->params);
-        }
-
-        if (x4->crf_max >= 0 &&
-            x4->params.rc.f_rf_constant_max != x4->crf_max) {
-            x4->params.rc.f_rf_constant_max = x4->crf_max;
             x264_encoder_reconfig(x4->enc, &x4->params);
         }
     }
@@ -526,7 +536,7 @@ static int setup_frame(AVCodecContext *ctx, const AVFrame *frame,
         pic->i_type = X264_TYPE_AUTO;
         break;
     }
-    reconfig_encoder(ctx, frame);
+    reconfig_encoder_from_frame(ctx, frame);
 
     if (x4->a53_cc) {
         void *sei_data;
@@ -755,6 +765,19 @@ static void X264_flush(AVCodecContext *avctx)
 
     if (x4->sei_size < 0)
         x4->sei_size = -x4->sei_size;
+}
+
+static av_cold int X264_reconf(AVCodecContext *avctx, AVDictionary **dict)
+{
+    int ret;
+
+    ret = ff_encode_reconf_parse_dict(avctx, dict);
+    if (ret < 0)
+        return ret;
+
+    reconfig_encoder(avctx);
+
+    return 0;
 }
 
 static av_cold int X264_close(AVCodecContext *avctx)
@@ -1492,6 +1515,7 @@ static const enum AVPixelFormat pix_fmts_8bit_rgb[] = {
 
 #define OFFSET(x) offsetof(X264Context, x)
 #define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
+#define VER VE | AV_OPT_FLAG_RUNTIME_PARAM
 static const AVOption options[] = {
     { "preset",        "Set the encoding preset (cf. x264 --fullhelp)",   OFFSET(preset),        AV_OPT_TYPE_STRING, { .str = "medium" }, 0, 0, VE},
     { "tune",          "Tune the encoding params (cf. x264 --fullhelp)",  OFFSET(tune),          AV_OPT_TYPE_STRING, { 0 }, 0, 0, VE},
@@ -1502,9 +1526,9 @@ static const AVOption options[] = {
     {"wpredp", "Weighted prediction for P-frames", OFFSET(wpredp), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, VE},
     {"a53cc",          "Use A53 Closed Captions (if available)",          OFFSET(a53_cc),        AV_OPT_TYPE_BOOL,   {.i64 = 1}, 0, 1, VE},
     {"x264opts", "x264 options", OFFSET(x264opts), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, VE},
-    { "crf",           "Select the quality for constant quality mode",    OFFSET(crf),           AV_OPT_TYPE_FLOAT,  {.dbl = -1 }, -1, FLT_MAX, VE },
-    { "crf_max",       "In CRF mode, prevents VBV from lowering quality beyond this point.",OFFSET(crf_max), AV_OPT_TYPE_FLOAT, {.dbl = -1 }, -1, FLT_MAX, VE },
-    { "qp",            "Constant quantization parameter rate control method",OFFSET(cqp),        AV_OPT_TYPE_INT,    { .i64 = -1 }, -1, INT_MAX, VE },
+    { "crf",           "Select the quality for constant quality mode",    OFFSET(crf),           AV_OPT_TYPE_FLOAT,  {.dbl = -1 }, -1, FLT_MAX, VER },
+    { "crf_max",       "In CRF mode, prevents VBV from lowering quality beyond this point.",OFFSET(crf_max), AV_OPT_TYPE_FLOAT, {.dbl = -1 }, -1, FLT_MAX, VER },
+    { "qp",            "Constant quantization parameter rate control method",OFFSET(cqp),        AV_OPT_TYPE_INT,    { .i64 = -1 }, -1, INT_MAX, VER },
     { "aq-mode",       "AQ method",                                       OFFSET(aq_mode),       AV_OPT_TYPE_INT,    { .i64 = -1 }, -1, INT_MAX, VE, .unit = "aq_mode"},
     { "none",          NULL,                              0, AV_OPT_TYPE_CONST, {.i64 = X264_AQ_NONE},         INT_MIN, INT_MAX, VE, .unit = "aq_mode" },
     { "variance",      "Variance AQ (complexity mask)",   0, AV_OPT_TYPE_CONST, {.i64 = X264_AQ_VARIANCE},     INT_MIN, INT_MAX, VE, .unit = "aq_mode" },
@@ -1574,7 +1598,10 @@ static const AVOption options[] = {
 };
 
 static const FFCodecDefault x264_defaults[] = {
-    { "b",                "0" },
+    { "sar",              "0", AV_OPT_FLAG_RUNTIME_PARAM },
+    { "b",                "0", AV_OPT_FLAG_RUNTIME_PARAM },
+    { "bufsize",          "0", AV_OPT_FLAG_RUNTIME_PARAM },
+    { "maxrate",          "0", AV_OPT_FLAG_RUNTIME_PARAM },
     { "bf",               "-1" },
     { "flags2",           "0" },
     { "g",                "-1" },
@@ -1616,6 +1643,7 @@ const FFCodec ff_libx264_encoder = {
                         AV_CODEC_CAP_OTHER_THREADS |
                         AV_CODEC_CAP_ENCODER_REORDERED_OPAQUE |
                         AV_CODEC_CAP_ENCODER_FLUSH |
+                        AV_CODEC_CAP_ENCODER_RECONF |
                         AV_CODEC_CAP_ENCODER_RECON_FRAME,
     .p.priv_class     = &x264_class,
     .p.wrapper_name   = "libx264",
@@ -1623,6 +1651,7 @@ const FFCodec ff_libx264_encoder = {
     .init             = X264_init,
     FF_CODEC_ENCODE_CB(X264_frame),
     .flush            = X264_flush,
+    .reconf           = X264_reconf,
     .close            = X264_close,
     .defaults         = x264_defaults,
     CODEC_PIXFMTS_ARRAY(pix_fmts_all),
