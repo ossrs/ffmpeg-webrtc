@@ -44,11 +44,27 @@
 #include "libavutil/avstring.h"
 #include "libavutil/random_seed.h"
 
-static int mbedtls_x509_fingerprint(char *cert_buf, size_t cert_sz, char **fingerprint)
+static int mbedtls_x509_crt_fingerprint(const mbedtls_x509_crt *crt, char **fingerprint)
 {
     unsigned char md[32];
     size_t n = sizeof(md);
     AVBPrint buf;
+    int ret;
+
+    if ((ret = mbedtls_sha256(crt->raw.p, crt->raw.len, md, 0)) != 0)
+        return AVERROR(EINVAL);
+
+    av_bprint_init(&buf, n*3, n*3);
+
+    for (int i = 0; i < n - 1; i++)
+        av_bprintf(&buf, "%02X:", md[i]);
+    av_bprintf(&buf, "%02X", md[n - 1]);
+
+    return av_bprint_finalize(&buf, fingerprint);
+}
+
+static int mbedtls_x509_fingerprint(char *cert_buf, size_t cert_sz, char **fingerprint)
+{
     int ret;
     mbedtls_x509_crt crt;
 
@@ -59,18 +75,9 @@ static int mbedtls_x509_fingerprint(char *cert_buf, size_t cert_sz, char **finge
         return AVERROR(EINVAL);
     }
 
-    if ((ret = mbedtls_sha256(crt.raw.p, crt.raw.len, md, 0)) != 0) {
-        mbedtls_x509_crt_free(&crt);
-        return AVERROR(EINVAL);
-    }
-
-    av_bprint_init(&buf, n*3, n*3);
-
-    for (int i = 0; i < n - 1; i++)
-        av_bprintf(&buf, "%02X:", md[i]);
-    av_bprintf(&buf, "%02X", md[n - 1]);
-
-    return av_bprint_finalize(&buf, fingerprint);
+    ret = mbedtls_x509_crt_fingerprint(&crt, fingerprint);
+    mbedtls_x509_crt_free(&crt);
+    return ret;
 }
 
 int ff_ssl_read_key_cert(char *key_url, char *cert_url, char *key_buf, size_t key_sz, char *cert_buf, size_t cert_sz, char **fingerprint)
@@ -470,6 +477,27 @@ static void handle_handshake_error(URLContext *h, int ret)
     }
 }
 
+/* Return value: 0 success, < 0 fail. */
+static int mbedtls_verify_fingerprint(void *data, mbedtls_x509_crt *crt,
+                                      int depth, uint32_t *flags)
+{
+    TLSContext *tls_ctx = (TLSContext *)data;
+    TLSShared *shr = &tls_ctx->tls_shared;
+    char *fingerprint = NULL;
+    int ret;
+
+    ret = mbedtls_x509_crt_fingerprint(crt, &fingerprint);
+    if (ret < 0) {
+        ret = MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+        goto end;
+    }
+
+    ret = av_strcasecmp(shr->peer_fp, fingerprint) ? MBEDTLS_ERR_X509_CERT_VERIFY_FAILED : 0;
+end:
+    av_freep(&fingerprint);
+    return ret;
+}
+
 static int tls_handshake(URLContext *h)
 {
     TLSContext *tls_ctx = h->priv_data;
@@ -643,6 +671,8 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     // not VERIFY_REQUIRED because we manually check after handshake
     mbedtls_ssl_conf_authmode(&tls_ctx->ssl_config,
                               shr->verify ? MBEDTLS_SSL_VERIFY_OPTIONAL : MBEDTLS_SSL_VERIFY_NONE);
+    if (shr->fp_verify && shr->is_dtls && shr->peer_fp)
+        mbedtls_ssl_conf_verify(&tls_ctx->ssl_config, mbedtls_verify_fingerprint, tls_ctx);
     mbedtls_ssl_conf_rng(&tls_ctx->ssl_config, mbedtls_ctr_drbg_random, &tls_ctx->ctr_drbg_context);
     mbedtls_ssl_conf_ca_chain(&tls_ctx->ssl_config, &tls_ctx->ca_cert, NULL);
 

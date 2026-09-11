@@ -32,6 +32,7 @@
 #include "os_support.h"
 #include "url.h"
 #include "tls.h"
+#include "libavutil/avstring.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
@@ -529,6 +530,51 @@ end:
     return ret;
 }
 
+/* Return value: 0 success, < 0 fail. */
+static int gnutls_verify_fingerprint(gnutls_session_t session)
+{
+    TLSContext *c = (TLSContext *)(gnutls_session_get_ptr(session));
+    TLSShared *s = &c->tls_shared;
+    unsigned int cert_list_size = 0;
+    const gnutls_datum_t *cert_list;
+    gnutls_x509_crt_t cert;
+    char *fingerprint = NULL;
+    int ret;
+
+    if (gnutls_certificate_type_get(session) != GNUTLS_CRT_X509) {
+        av_log(c, AV_LOG_ERROR, "Unsupported certificate type\n");
+        return GNUTLS_E_CERTIFICATE_ERROR;
+    }
+
+    cert_list = gnutls_certificate_get_peers(session, &cert_list_size);
+    if (!cert_list || !cert_list_size) {
+        av_log(c, AV_LOG_ERROR, "No peer certificate for fingerprint verification\n");
+        return GNUTLS_E_CERTIFICATE_ERROR;
+    }
+
+    ret = gnutls_x509_crt_init(&cert);
+    if (ret < 0)
+        return GNUTLS_E_CERTIFICATE_ERROR;
+
+    ret = gnutls_x509_crt_import(cert, &cert_list[0], GNUTLS_X509_FMT_DER);
+    if (ret < 0) {
+        gnutls_x509_crt_deinit(cert);
+        return GNUTLS_E_CERTIFICATE_ERROR;
+    }
+
+    ret = gnutls_x509_fingerprint(cert, &fingerprint);
+    gnutls_x509_crt_deinit(cert);
+    if (ret < 0) {
+        ret = GNUTLS_E_CERTIFICATE_ERROR;
+        goto end;
+    }
+
+    ret = av_strcasecmp(s->peer_fp, fingerprint) ? GNUTLS_E_CERTIFICATE_ERROR : 0;
+end:
+    av_freep(&fingerprint);
+    return ret;
+}
+
 static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
 {
     TLSContext *c = h->priv_data;
@@ -561,6 +607,8 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
 #endif
     gnutls_certificate_set_verify_flags(c->cred, s->verify ?
                                         GNUTLS_VERIFY_ALLOW_X509_V1_CA_CRT : 0);
+    if (s->fp_verify && s->is_dtls && s->peer_fp)
+        gnutls_certificate_set_verify_function(c->cred, gnutls_verify_fingerprint);
     if (s->cert_file && s->key_file) {
         ret = gnutls_certificate_set_x509_key_file(c->cred,
                                                    s->cert_file, s->key_file,
@@ -624,6 +672,7 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     }
 
     gnutls_init(&c->session, gnutls_flags);
+    gnutls_session_set_ptr(c->session, c);
 
     if (!s->listen && !s->numerichost)
         gnutls_server_name_set(c->session, GNUTLS_NAME_DNS, s->host, strlen(s->host));
