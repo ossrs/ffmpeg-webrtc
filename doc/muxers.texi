@@ -4156,6 +4156,12 @@ Default value is 1200.
 Set the buffer size, in bytes, of underlying protocol.
 Default value is -1(auto). The UDP auto selects a reasonable value.
 
+@item min_port
+Set minimum local UDP port. Default value is 5000.
+
+@item max_port
+Set maximum local UDP port. Default value is 65000.
+
 @item whip_flags @var{flags}
 Possible values:
 
