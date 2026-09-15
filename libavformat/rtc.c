@@ -49,12 +49,12 @@
 
 /* STUN Attribute, comprehension-required range (0x0000-0x7FFF) */
 enum STUNAttr {
-    STUN_ATTR_USERNAME          = 0x0006, /// shared secret response/bind request
-    STUN_ATTR_PRIORITY          = 0x0024, /// must be included in a Binding request
-    STUN_ATTR_USE_CANDIDATE     = 0x0025, /// bind request
-    STUN_ATTR_MESSAGE_INTEGRITY = 0x0008, /// bind request/response
-    STUN_ATTR_FINGERPRINT       = 0x8028, /// rfc5389
-    STUN_ATTR_ICE_CONTROLLING   = 0x802A, /// ICE controlling role
+    STUN_ATTR_USERNAME                  = 0x0006, /// shared secret response/bind request
+    STUN_ATTR_PRIORITY                  = 0x0024, /// must be included in a Binding request
+    STUN_ATTR_USE_CANDIDATE             = 0x0025, /// bind request
+    STUN_ATTR_MESSAGE_INTEGRITY         = 0x0008, /// bind request/response
+    STUN_ATTR_FINGERPRINT               = 0x8028, /// rfc5389
+    STUN_ATTR_ICE_CONTROLLING           = 0x802A, /// ICE controlling role
 };
 
 /**
@@ -71,8 +71,8 @@ enum STUNAttr {
  * @return Returns 0 if successful or AVERROR_xxx if an error occurs.
  */
 int ff_rtc_ice_create_request(RTCContext *rtc,
-                                      uint8_t *buf, int buf_size,
-                                      int *request_size)
+                              uint8_t *buf, int buf_size,
+                              int *request_size)
 {
     int ret, size, crc32;
     char username[128];
@@ -170,9 +170,9 @@ end:
  * @return Returns 0 if successful or AVERROR_xxx if an error occurs.
  */
 int ff_rtc_ice_create_response(RTCContext *rtc,
-                                       char *tid, int tid_size,
-                                       uint8_t *buf, int buf_size,
-                                       int *response_size)
+                               char *tid, int tid_size,
+                               uint8_t *buf, int buf_size,
+                               int *response_size)
 {
     int ret = 0, size, crc32;
     AVIOContext *pb = NULL;
@@ -301,9 +301,9 @@ av_cold int ff_rtc_certificate_key_init(RTCContext *rtc)
 av_cold int ff_rtc_dtls_initialize(RTCContext *rtc)
 {
     int ret = 0;
+    int is_dtls_active = rtc->flags & RTC_DTLS_ACTIVE;
     AVDictionary *opts = NULL;
     char buf[256];
-    int is_dtls_active = rtc->flags & RTC_DTLS_ACTIVE;
 
     ff_url_join(buf, sizeof(buf), "dtls", NULL, rtc->ice_host, rtc->ice_port, NULL);
     av_dict_set_int(&opts, "mtu", rtc->pkt_size, 0);
@@ -558,7 +558,7 @@ int ff_rtc_ice_handle_binding_request(RTCContext *rtc, char *buf, int buf_size)
 
     /* Build the STUN binding response. */
     ret = ff_rtc_ice_create_response(rtc, tid, sizeof(tid), rtc->buf,
-                                             sizeof(rtc->buf), &size);
+                                     sizeof(rtc->buf), &size);
     if (ret < 0) {
         av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to create STUN binding response, size=%d\n", size);
         return ret;
@@ -587,8 +587,7 @@ int ff_rtc_ice_dtls_handshake(RTCContext *rtc)
     while (1) {
         if (rtc->state <= RTC_STATE_ICE_CONNECTING) {
             /* Build the STUN binding request. */
-            ret = ff_rtc_ice_create_request(rtc, rtc->buf, sizeof(rtc->buf),
-                                                    &size);
+            ret = ff_rtc_ice_create_request(rtc, rtc->buf, sizeof(rtc->buf), &size);
             if (ret < 0) {
                 av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
                 goto end;

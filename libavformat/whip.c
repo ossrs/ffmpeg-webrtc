@@ -1024,8 +1024,7 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
      */
     if (now - rtc->last_consent_tx_time > WHIP_ICE_CONSENT_CHECK_INTERVAL * RTC_US_PER_MS) {
         int size;
-        ret = ff_rtc_ice_create_request(&whip->rtc, rtc->buf, sizeof(rtc->buf),
-                                                &size);
+        ret = ff_rtc_ice_create_request(rtc, rtc->buf, sizeof(rtc->buf), &size);
         if (ret < 0) {
             av_log(whip, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
             goto end;
