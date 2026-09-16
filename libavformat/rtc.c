@@ -25,7 +25,6 @@
 #include "libavutil/crc.h"
 #include "libavutil/hmac.h"
 #include "libavutil/intreadwrite.h"
-#include "libavutil/avstring.h"
 #include "libavutil/mem.h"
 #include "libavutil/random_seed.h"
 #include "libavutil/time.h"
@@ -64,7 +63,7 @@ enum STUNAttr {
  * generates the username attribute and does not include goog-network-info,
  * use-candidate. However, some of these attributes may be added in the future.
  *
- * @param s Pointer to the AVFormatContext
+ * @param rtc Pointer to the RTCContext
  * @param buf Pointer to memory buffer to store the request packet
  * @param buf_size Size of the memory buffer
  * @param request_size Pointer to an integer that receives the size of the request packet
@@ -161,7 +160,7 @@ end:
  * This function generates an ICE binding response and writes it to the provided
  * buffer. The response is signed using the local password for message integrity.
  *
- * @param s Pointer to the AVFormatContext structure.
+ * @param rtc Pointer to the RTCContext structure.
  * @param tid Pointer to the transaction ID of the binding request. The tid_size should be 12.
  * @param tid_size The size of the transaction ID, should be 12.
  * @param buf Pointer to the buffer where the response will be written.
@@ -281,7 +280,7 @@ av_cold int ff_rtc_certificate_key_init(RTCContext *rtc)
                                         rtc->key_buf, sizeof(rtc->key_buf),
                                         rtc->cert_buf, sizeof(rtc->cert_buf),
                                         &rtc->dtls_fingerprint)) < 0) {
-            av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to read DTLS certificate from cert=%s, key=%s\n",
+            av_log(rtc->ctx, AV_LOG_ERROR, "Failed to read DTLS certificate from cert=%s, key=%s\n",
                 rtc->cert_file, rtc->key_file);
             return ret;
         }
@@ -290,7 +289,7 @@ av_cold int ff_rtc_certificate_key_init(RTCContext *rtc)
         if ((ret = ff_ssl_gen_key_cert(rtc->key_buf, sizeof(rtc->key_buf),
                                        rtc->cert_buf, sizeof(rtc->cert_buf),
                                        &rtc->dtls_fingerprint)) < 0) {
-            av_log(rtc->ctx->priv_data, AV_LOG_ERROR, "Failed to generate DTLS private key and certificate\n");
+            av_log(rtc->ctx, AV_LOG_ERROR, "Failed to generate DTLS private key and certificate\n");
             return ret;
         }
     }
@@ -334,7 +333,7 @@ end:
     return ret;
 }
 
-int ff_rtc_initialize(RTCContext *rtc)
+av_cold int ff_rtc_initialize(RTCContext *rtc)
 {
     int ret;
     uint32_t seed;
@@ -373,7 +372,7 @@ int ff_rtc_initialize(RTCContext *rtc)
  * candidate if there are multiple candidates. However, support for multiple candidates
  * will be added in the future.
  *
- * @param s Pointer to the AVFormatContext
+ * @param rtc Pointer to the RTCContext
  * @returns Returns 0 if successful or AVERROR_xxx if an error occurs.
  */
 int ff_rtc_parse_answer(RTCContext *rtc)
@@ -858,7 +857,7 @@ end:
     return ret;
 }
 
-void ff_rtc_deinit(RTCContext *rtc)
+av_cold void ff_rtc_deinit(RTCContext *rtc)
 {
     av_freep(&rtc->sdp_offer);
     av_freep(&rtc->sdp_answer);
