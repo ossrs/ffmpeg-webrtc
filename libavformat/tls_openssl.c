@@ -24,6 +24,7 @@
 
 #include "network.h"
 #include "os_support.h"
+#include "libavutil/mem.h"
 #include "libavutil/time.h"
 #include "libavutil/random_seed.h"
 #include "url.h"
@@ -775,6 +776,28 @@ fail:
     return ret;
 }
 
+/* Return value: 1 success, 0 fail. */
+static int openssl_verify_fingerprint(int preverify_ok, X509_STORE_CTX *ctx)
+{
+    int ret = 0;
+    char* fingerprint = NULL;
+	SSL *ssl = (SSL *)(X509_STORE_CTX_get_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx()));
+	TLSContext *c = (TLSContext *)(SSL_get_ex_data(ssl, 0));
+	X509 *cert = X509_STORE_CTX_get_current_cert(ctx);
+
+    ret = x509_fingerprint(cert, &fingerprint);
+    if (ret < 0) {
+        ret = 0;
+        goto end;
+    }
+
+    ret = av_strcasecmp(c->tls_shared.peer_fp, fingerprint) ? 0 : 1;
+
+end:
+    av_freep(&fingerprint);
+    return ret;
+}
+
 static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
 {
     TLSContext *c = h->priv_data;
@@ -814,6 +837,8 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
 
     if (s->verify)
         SSL_CTX_set_verify(c->ctx, SSL_VERIFY_PEER|SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+    else if (s->fp_verify && s->is_dtls && s->peer_fp)
+        SSL_CTX_set_verify(c->ctx, SSL_VERIFY_PEER|SSL_VERIFY_FAIL_IF_NO_PEER_CERT, openssl_verify_fingerprint);
 
     if (s->is_dtls && s->use_srtp) {
         /**
