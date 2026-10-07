@@ -57,6 +57,8 @@ typedef struct TLSShared {
     const AVClass *class;
     char *ca_file;
     int verify;
+    int fp_verify;
+    char *peer_fp;
     char *cert_file;
     char *key_file;
     int listen;
@@ -106,6 +108,8 @@ typedef struct TLSShared {
     {"mtu", "Maximum Transmission Unit", offsetof(pstruct, options_field . mtu), AV_OPT_TYPE_INT,  { .i64 = 0 }, 0, INT_MAX, .flags = TLS_OPTFL}, \
     {"cert_pem",   "Certificate PEM string",              offsetof(pstruct, options_field . cert_buf),  AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }, \
     {"key_pem",    "Private key PEM string",              offsetof(pstruct, options_field . key_buf),   AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }, \
+    {"fp_verify",  "Verify the peer certificate's fingerprint", offsetof(pstruct, options_field . fp_verify),    AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, .flags = TLS_OPTFL }, \
+    {"peer_fp",    "The peer certificates's fingerprint", offsetof(pstruct, options_field . peer_fp), AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }, \
     FF_TLS_CLIENT_OPTIONS(pstruct, options_field)
 
 int ff_tls_parse_host(TLSShared *s, char *hostname, int hostname_size, int *port_ptr, const char *uri);
