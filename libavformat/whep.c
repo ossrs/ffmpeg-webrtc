@@ -21,6 +21,8 @@
 
 #include "libavutil/base64.h"
 #include "libavutil/bprint.h"
+#include "libavutil/channel_layout.h"
+#include "libavutil/intreadwrite.h"
 #include "libavutil/internal.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
@@ -29,22 +31,50 @@
 #include "demux.h"
 #include "internal.h"
 #include "rtc.h"
+#include "rtpdec.h"
+#include "rtpdec_formats.h"
 #include "srtp.h"
 #include "tls.h"
 
 #define WHEP_RTP_PAYLOAD_TYPE_H264 106
 #define WHEP_RTP_PAYLOAD_TYPE_OPUS 111
 
+#define WHEP_READ_TIMEOUT_US (10 * 1000000)
+#define WHEP_PLI_INTERVAL_US (1 * 1000000)
+#define WHEP_CONSENT_INTERVAL_US (2 * 1000000)
+
+#define WHEP_AUDIO_CLOCK_RATE 48000
+#define WHEP_VIDEO_CLOCK_RATE 90000
+
+#define WHEP_SRTP_SUITE "SRTP_AES128_CM_HMAC_SHA1_80"
+
 #define WHEP_SDP_SESSION_ID "4489045141692799359"
 #define WHEP_SDP_CREATOR_IP "127.0.0.1"
+
+typedef struct WHEPStream {
+    RTPDemuxContext *rtp;
+    PayloadContext *payload;
+    const RTPDynamicProtocolHandler *handler;
+    int payload_type;
+} WHEPStream;
 
 typedef struct WHEPContext {
     AVClass *av_class;
 
     RTCContext rtc;
 
-    /* The SRTP receive context, to decrypt incoming packets. */
-    SRTPContext srtp_recv;
+    /* The RTP depacketizers, index 0 is audio and index 1 is video. */
+    WHEPStream streams[2];
+    /* 1 + the index of the stream that still has packets queued, or 0. */
+    int pending;
+    /* Base64 of the SRTP master key and salt used to decrypt incoming media. */
+    char srtp_recv_key[AV_BASE64_SIZE(RTC_DTLS_SRTP_KEY_LEN + RTC_DTLS_SRTP_SALT_LEN)];
+
+    /* The SRTP context used to encrypt outgoing RTCP (PLI). */
+    SRTPContext srtp_rtcp_send;
+    /* Time of the last PLI, and whether a keyframe has been received. */
+    int64_t last_pli_time;
+    int got_keyframe;
 } WHEPContext;
 
 /**
@@ -117,11 +147,13 @@ static int generate_sdp_offer(AVFormatContext *s)
         "a=rtcp-mux\r\n"
         "a=rtcp-mux-only\r\n"
         "a=rtpmap:%u H264/90000\r\n"
+        "a=rtcp-fb:%u nack pli\r\n"
         "a=fmtp:%u level-asymmetry-allowed=1;packetization-mode=1\r\n",
         WHEP_RTP_PAYLOAD_TYPE_H264,
         rtc->ice_ufrag_local,
         rtc->ice_pwd_local,
         rtc->dtls_fingerprint,
+        WHEP_RTP_PAYLOAD_TYPE_H264,
         WHEP_RTP_PAYLOAD_TYPE_H264,
         WHEP_RTP_PAYLOAD_TYPE_H264);
 
@@ -148,9 +180,9 @@ end:
 }
 
 /**
- * Establish the SRTP receive context using the keying material exported
- * from DTLS. WHEP does not send media, so unlike whip.c there are no send
- * contexts.
+ * Derive the SRTP receive key from the keying material exported from DTLS
+ * and keep it for the RTP demuxers. WHEP does not send media, so unlike
+ * whip.c there are no send contexts.
  *
  * @return 0 if OK, AVERROR_xxx on error
  */
@@ -164,7 +196,7 @@ static int setup_srtp(AVFormatContext *s)
      * The profile for OpenSSL's SRTP is SRTP_AES128_CM_SHA1_80, see ssl/d1_srtp.c.
      * The profile for FFmpeg's SRTP is SRTP_AES128_CM_HMAC_SHA1_80, see libavformat/srtp.c.
      */
-    const char *suite = "SRTP_AES128_CM_HMAC_SHA1_80";
+    const char *suite = WHEP_SRTP_SUITE;
     WHEPContext *whep = s->priv_data;
     RTCContext *rtc = &whep->rtc;
     int is_dtls_active = rtc->flags & RTC_DTLS_ACTIVE;
@@ -200,9 +232,17 @@ static int setup_srtp(AVFormatContext *s)
         goto end;
     }
 
-    ret = ff_srtp_set_crypto(&whep->srtp_recv, suite, buf);
+    memcpy(whep->srtp_recv_key, buf, sizeof(whep->srtp_recv_key));
+
+    if (!av_base64_encode(buf, sizeof(buf), send_key, sizeof(send_key))) {
+        av_log(whep, AV_LOG_ERROR, "Failed to encode send key\n");
+        ret = AVERROR(EIO);
+        goto end;
+    }
+
+    ret = ff_srtp_set_crypto(&whep->srtp_rtcp_send, suite, buf);
     if (ret < 0) {
-        av_log(whep, AV_LOG_ERROR, "Failed to set crypto for recv\n");
+        av_log(whep, AV_LOG_ERROR, "Failed to set crypto for rtcp send\n");
         goto end;
     }
 
@@ -216,10 +256,236 @@ end:
     return ret;
 }
 
+/**
+ * Create a stream and the RTP depacketizer that feeds it. Each stream gets its
+ * own SRTP context, since sequence numbers and ROC are tracked per SSRC.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int add_rtp_stream(AVFormatContext *s, int index, enum AVMediaType type,
+                          const RTPDynamicProtocolHandler *handler,
+                          int payload_type, int clock_rate)
+{
+    int ret;
+    AVStream *st;
+    AVCodecParameters *par;
+    WHEPContext *whep = s->priv_data;
+    WHEPStream *ws = &whep->streams[index];
+
+    st = avformat_new_stream(s, NULL);
+    if (!st)
+        return AVERROR(ENOMEM);
+
+    par = st->codecpar;
+    par->codec_type = type;
+    par->codec_id   = handler->codec_id;
+    if (type == AVMEDIA_TYPE_AUDIO) {
+        par->sample_rate = clock_rate;
+        av_channel_layout_default(&par->ch_layout, 2);
+    }
+    avpriv_set_pts_info(st, 32, 1, clock_rate);
+    ffstream(st)->need_parsing = handler->need_parsing;
+
+    ws->handler      = handler;
+    ws->payload_type = payload_type;
+    if (handler->priv_data_size) {
+        ws->payload = av_mallocz(handler->priv_data_size);
+        if (!ws->payload)
+            return AVERROR(ENOMEM);
+    }
+
+    /* No reordering queue for now, packets are expected in order. */
+    ws->rtp = ff_rtp_parse_open(s, st, payload_type, 0);
+    if (!ws->rtp)
+        return AVERROR(ENOMEM);
+    ff_rtp_parse_set_dynamic_protocol(ws->rtp, ws->payload, handler);
+
+    if (handler->init && (ret = handler->init(s, st->index, ws->payload)) < 0)
+        return ret;
+
+    ff_rtp_parse_set_crypto(ws->rtp, WHEP_SRTP_SUITE, whep->srtp_recv_key);
+    if (!ws->rtp->srtp_enabled) {
+        av_log(whep, AV_LOG_ERROR, "Failed to set crypto for stream %d\n", index);
+        return AVERROR(EINVAL);
+    }
+
+    return 0;
+}
+
+static int create_streams(AVFormatContext *s)
+{
+    int ret;
+    WHEPContext *whep = s->priv_data;
+    RTCContext *rtc = &whep->rtc;
+
+    ret = add_rtp_stream(s, 0, AVMEDIA_TYPE_AUDIO, &ff_opus_dynamic_handler,
+                         WHEP_RTP_PAYLOAD_TYPE_OPUS, WHEP_AUDIO_CLOCK_RATE);
+    if (ret < 0)
+        return ret;
+
+    ret = add_rtp_stream(s, 1, AVMEDIA_TYPE_VIDEO, &ff_h264_dynamic_handler,
+                         WHEP_RTP_PAYLOAD_TYPE_H264, WHEP_VIDEO_CLOCK_RATE);
+    if (ret < 0)
+        return ret;
+
+    if (rtc->state < RTC_STATE_READY)
+        rtc->state = RTC_STATE_READY;
+    av_log(whep, AV_LOG_VERBOSE, "Streams created, state=%d, elapsed=%.2fms\n",
+        rtc->state, RTC_ELAPSED(rtc->starttime, av_gettime_relative()));
+
+    return 0;
+}
+
+/**
+ * Check whether a decrypted H.264 RTP packet carries the start of a keyframe
+ * (IDR or SPS, single NAL unit or the first FU-A fragment). STAP-A is not
+ * inspected.
+ */
+static int rtp_h264_is_keyframe(const uint8_t *buf, int len)
+{
+    int off = 12 + 4 * (buf[0] & 0x0f), nal;
+
+    if ((buf[0] & 0x10) && len >= off + 4)
+        off += 4 + 4 * AV_RB16(buf + off + 2);
+    if (len < off + 2)
+        return 0;
+
+    nal = buf[off] & 0x1f;
+    if (nal == 28) {
+        if (!(buf[off + 1] & 0x80))
+            return 0;
+        nal = buf[off + 1] & 0x1f;
+    }
+    return nal == 5 || nal == 7;
+}
+
+/**
+ * Send a Picture Loss Indication (RFC 4585) so the server sends a keyframe.
+ * Without one, a late joiner cannot decode video until the next keyframe.
+ */
+static void send_pli(AVFormatContext *s, uint32_t media_ssrc)
+{
+    uint8_t pli[12], out[sizeof(pli) + 16];
+    WHEPContext *whep = s->priv_data;
+    RTCContext *rtc = &whep->rtc;
+    int ret;
+
+    pli[0] = 0x81;      /* V=2, FMT=1 (PLI) */
+    pli[1] = 206;       /* PSFB */
+    AV_WB16(pli + 2, 2);
+    AV_WB32(pli + 4, media_ssrc + 1);
+    AV_WB32(pli + 8, media_ssrc);
+
+    ret = ff_srtp_encrypt(&whep->srtp_rtcp_send, pli, sizeof(pli), out, sizeof(out));
+    if (ret <= 0) {
+        av_log(whep, AV_LOG_WARNING, "Failed to encrypt PLI, ret=%d\n", ret);
+        return;
+    }
+
+    ret = ffurl_write(rtc->udp, out, ret);
+    if (ret < 0)
+        av_log(whep, AV_LOG_WARNING, "Failed to send PLI, ret=%d\n", ret);
+    else
+        av_log(whep, AV_LOG_DEBUG, "PLI sent for ssrc=%u\n", media_ssrc);
+}
+
+/**
+ * Send an ICE binding request as a keepalive (RFC 7675 consent freshness),
+ * otherwise the server drops the session after its timeout (30s on SRS).
+ */
+static void send_consent(AVFormatContext *s)
+{
+    int ret, size;
+    WHEPContext *whep = s->priv_data;
+    RTCContext *rtc = &whep->rtc;
+
+    ret = ff_rtc_ice_create_request(rtc, rtc->buf, sizeof(rtc->buf), &size);
+    if (ret < 0) {
+        av_log(whep, AV_LOG_WARNING, "Failed to create consent request\n");
+        return;
+    }
+
+    ret = ffurl_write(rtc->udp, rtc->buf, size);
+    if (ret < 0)
+        av_log(whep, AV_LOG_WARNING, "Failed to send consent request, ret=%d\n", ret);
+    else
+        rtc->last_consent_tx_time = av_gettime_relative();
+}
+
 static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
-    /* RTP receive and depacketization are not implemented yet. */
-    return AVERROR(ENOSYS);
+    int ret, i, pt, size;
+    uint8_t *buf;
+    WHEPContext *whep = s->priv_data;
+    RTCContext *rtc = &whep->rtc;
+    int64_t last_rx = av_gettime_relative();
+
+    /* Return the packets still queued from the previous RTP packet first. */
+    if (whep->pending) {
+        ret = ff_rtp_parse_packet(whep->streams[whep->pending - 1].rtp, pkt, NULL, 0);
+        if (ret <= 0)
+            whep->pending = 0;
+        if (ret >= 0)
+            return 0;
+    }
+
+    while (1) {
+        if (ff_check_interrupt(&s->interrupt_callback))
+            return AVERROR_EXIT;
+
+        if (av_gettime_relative() - rtc->last_consent_tx_time > WHEP_CONSENT_INTERVAL_US)
+            send_consent(s);
+
+        ret = ffurl_read(rtc->udp, rtc->buf, sizeof(rtc->buf));
+        if (ret == AVERROR(EAGAIN)) {
+            if (av_gettime_relative() - last_rx > WHEP_READ_TIMEOUT_US) {
+                av_log(whep, AV_LOG_ERROR, "No packets received for %d seconds\n",
+                       WHEP_READ_TIMEOUT_US / 1000000);
+                return AVERROR(ETIMEDOUT);
+            }
+            av_usleep(RTC_ICE_DTLS_READ_SLEEP_DURATION * RTC_US_PER_MS);
+            continue;
+        }
+        if (ret < 0)
+            return ret;
+
+        last_rx = av_gettime_relative();
+        buf = (uint8_t *)rtc->buf;
+
+        if (ff_rtc_ice_is_binding_request(buf, ret)) {
+            if ((ret = ff_rtc_ice_handle_binding_request(rtc, rtc->buf, ret)) < 0)
+                return ret;
+            continue;
+        }
+
+        /* Drop STUN responses, DTLS and RTCP. RTCP is not handled yet. */
+        if (!ff_rtc_media_is_rtp_rtcp(buf, ret) || ff_rtc_media_is_rtcp(buf, ret))
+            continue;
+
+        pt = buf[1] & 0x7f;
+        for (i = 0; i < FF_ARRAY_ELEMS(whep->streams); i++)
+            if (whep->streams[i].payload_type == pt)
+                break;
+        if (i == FF_ARRAY_ELEMS(whep->streams))
+            continue;
+
+        size = ret;
+        ret = ff_rtp_parse_packet(whep->streams[i].rtp, pkt, &buf, ret);
+        if (i == 1 && !whep->got_keyframe &&
+            av_gettime_relative() - whep->last_pli_time > WHEP_PLI_INTERVAL_US) {
+            whep->last_pli_time = av_gettime_relative();
+            send_pli(s, whep->streams[1].rtp->ssrc);
+        }
+        /* The packet was decrypted in place, inspect it for a keyframe. */
+        if (i == 1 && !whep->got_keyframe && size > 14 &&
+            rtp_h264_is_keyframe((uint8_t *)rtc->buf, size))
+            whep->got_keyframe = 1;
+        if (ret < 0)
+            continue;
+        if (ret > 0)
+            whep->pending = i + 1;
+        return 0;
+    }
 }
 
 static av_cold int whep_init(AVFormatContext *s)
@@ -259,6 +525,9 @@ static av_cold int whep_init(AVFormatContext *s)
     if ((ret = setup_srtp(s)) < 0)
         goto end;
 
+    if ((ret = create_streams(s)) < 0)
+        goto end;
+
 end:
     if (ret < 0)
         rtc->state = RTC_STATE_FAILED;
@@ -275,7 +544,19 @@ static av_cold int whep_close(AVFormatContext *s)
     if (ret < 0)
         av_log(whep, AV_LOG_WARNING, "Failed to dispose resource, ret=%d\n", ret);
 
-    ff_srtp_free(&whep->srtp_recv);
+    for (int i = 0; i < FF_ARRAY_ELEMS(whep->streams); i++) {
+        WHEPStream *ws = &whep->streams[i];
+
+        if (ws->rtp)
+            ff_rtp_parse_close(ws->rtp);
+        if (ws->payload) {
+            if (ws->handler && ws->handler->close)
+                ws->handler->close(ws->payload);
+            av_freep(&ws->payload);
+        }
+    }
+
+    ff_srtp_free(&whep->srtp_rtcp_send);
     ff_rtc_deinit(rtc);
 
     return 0;
