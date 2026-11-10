@@ -488,6 +488,41 @@ static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
     }
 }
 
+/**
+ * Our offer uses a=setup:actpass, so the server picks the DTLS role (RFC 8842):
+ * if the answer says "passive" we are the DTLS client, if it says "active"
+ * we are the server. The shared answer parser does not read this line.
+ *
+ * @return 0 if OK, AVERROR_xxx on error
+ */
+static int parse_dtls_role(AVFormatContext *s)
+{
+    WHEPContext *whep = s->priv_data;
+    RTCContext *rtc = &whep->rtc;
+    const char *p = rtc->sdp_answer, *role = NULL;
+
+    while (p && *p) {
+        if (av_strstart(p, "a=setup:", &role))
+            break;
+        p = strchr(p, '\n');
+        if (p)
+            p++;
+    }
+
+    if (role && av_strstart(role, "passive", NULL)) {
+        rtc->flags |= RTC_DTLS_ACTIVE;
+    } else if (role && av_strstart(role, "active", NULL)) {
+        rtc->flags &= ~RTC_DTLS_ACTIVE;
+    } else {
+        av_log(whep, AV_LOG_ERROR, "No usable a=setup in the answer\n");
+        return AVERROR(EINVAL);
+    }
+
+    av_log(whep, AV_LOG_VERBOSE, "DTLS role: %s\n",
+           (rtc->flags & RTC_DTLS_ACTIVE) ? "active" : "passive");
+    return 0;
+}
+
 static av_cold int whep_init(AVFormatContext *s)
 {
     int ret;
@@ -509,12 +544,8 @@ static av_cold int whep_init(AVFormatContext *s)
     if ((ret = ff_rtc_parse_answer(rtc)) < 0)
         goto end;
 
-    /**
-     * Our offer uses a=setup:actpass, so the server picks the DTLS role.
-     * SRS always answers a=setup:passive, which makes us the DTLS client.
-     * Reading a=setup: from the answer is not implemented yet.
-     */
-    rtc->flags |= RTC_DTLS_ACTIVE;
+    if ((ret = parse_dtls_role(s)) < 0)
+        goto end;
 
     if ((ret = ff_rtc_udp_connect(rtc)) < 0)
         goto end;
